@@ -34,7 +34,9 @@ const indexFile = path.join(gitDir, 'gh-pages-index');
 fs.rmSync(indexFile, { force: true });
 const env = { ...process.env, GIT_INDEX_FILE: indexFile };
 
-git(['--work-tree', DIST, 'add', '--all', '--force', '.'], { env });
+// core.autocrlf=input: в рабочей копии на Windows файлы лежат с CRLF, и без
+// этого в ветку уезжали бы то LF, то CRLF — каждый деплой давал бы полный дифф.
+git(['-c', 'core.autocrlf=input', '--work-tree', DIST, 'add', '--all', '--force', '.'], { env });
 const tree = git(['write-tree'], { env });
 fs.rmSync(indexFile, { force: true });
 
