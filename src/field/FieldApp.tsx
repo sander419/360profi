@@ -1,17 +1,29 @@
 // Полевой режим: то, что сотрудник открывает на телефоне.
-// Отдельно от «штаба» — на площадке нужны крупные кнопки и три действия,
-// а не дашборд. Маршруты в хеше, чтобы работало на любой статике без переписывания URL.
+//
+// Главное требование к этому экрану — работать без связи. На площадке сеть
+// пропадает регулярно, и отметка, которую в этот момент нельзя поставить,
+// не ставится уже никогда. Поэтому чтение идёт через кеш, а запись — через
+// очередь с досылкой (src/api/offline.ts).
 
 import React, { useCallback, useEffect, useState } from 'react';
-import {
-  ApiError,
-  api,
-  apiConfigured,
-  clearSession,
-  getStoredUser,
-  getToken
-} from '../api/client.ts';
+import { ApiError, api, apiConfigured, clearSession, getStoredUser, getToken } from '../api/client.ts';
 import type { Equipment, HistoryEvent, Kit, SessionUser } from '../api/client.ts';
+import {
+  dropFailed,
+  loadEquipmentByCode,
+  loadEquipmentList,
+  loadHistory,
+  loadKit,
+  loadKits,
+  optimistic,
+  outbox,
+  perform,
+  retryFailed,
+  startAutoSync,
+  subscribeQueue,
+  syncNow
+} from '../api/offline.ts';
+import type { OutboxEntry } from '../api/outbox.ts';
 
 const STATUS_LABEL: Record<string, string> = {
   stock: 'На складе',
@@ -60,11 +72,14 @@ const daysSince = (iso: string | null): number | null => {
   return Math.round((Date.now() - then) / 86400000);
 };
 
+const QUEUED_HINT = 'Сохранено в телефоне. Отправим, как появится сеть';
+
 type Route =
   | { name: 'home' }
   | { name: 'equipment'; code: string }
   | { name: 'kit'; id: string }
-  | { name: 'stock' };
+  | { name: 'stock' }
+  | { name: 'queue' };
 
 const parseHash = (): Route => {
   const hash = window.location.hash.replace(/^#\/?/, '');
@@ -72,11 +87,33 @@ const parseHash = (): Route => {
   if (section === 'eq' && value) return { name: 'equipment', code: decodeURIComponent(value) };
   if (section === 'kit' && value) return { name: 'kit', id: value };
   if (section === 'stock') return { name: 'stock' };
+  if (section === 'queue') return { name: 'queue' };
   return { name: 'home' };
 };
 
 const go = (path: string): void => {
   window.location.hash = path;
+};
+
+const useOnline = (): boolean => {
+  const [online, setOnline] = useState(() => navigator.onLine !== false);
+  useEffect(() => {
+    const update = () => setOnline(navigator.onLine !== false);
+    window.addEventListener('online', update);
+    window.addEventListener('offline', update);
+    return () => {
+      window.removeEventListener('online', update);
+      window.removeEventListener('offline', update);
+    };
+  }, []);
+  return online;
+};
+
+const useQueue = (): { pending: OutboxEntry[]; failed: OutboxEntry[] } => {
+  const read = () => ({ pending: outbox.pending(), failed: outbox.failed() });
+  const [state, setState] = useState(read);
+  useEffect(() => subscribeQueue(() => setState(read())), []);
+  return state;
 };
 
 const Button: React.FC<{
@@ -103,60 +140,92 @@ const Button: React.FC<{
   );
 };
 
-const Notice: React.FC<{ text: string; tone: 'error' | 'ok' }> = ({ text, tone }) => (
-  <div
-    role="status"
-    className="rounded-2xl px-4 py-3 text-sm"
-    style={{
-      background: tone === 'error' ? 'var(--bad-dim)' : 'var(--ok-dim)',
-      color: tone === 'error' ? 'var(--bad)' : 'var(--ok)'
-    }}
-  >
-    {text}
-  </div>
+const Notice: React.FC<{ text: string; tone: 'error' | 'ok' | 'warn' }> = ({ text, tone }) => {
+  const palette = {
+    error: ['var(--bad-dim)', 'var(--bad)'],
+    ok: ['var(--ok-dim)', 'var(--ok)'],
+    warn: ['var(--warn-dim)', 'var(--warn)']
+  }[tone];
+  return (
+    <div
+      role="status"
+      className="rounded-2xl px-4 py-3 text-sm"
+      style={{ background: palette[0], color: palette[1] }}
+    >
+      {text}
+    </div>
+  );
+};
+
+const StaleBanner: React.FC<{ savedAt: string | null }> = ({ savedAt }) => (
+  <Notice
+    tone="warn"
+    text={`Нет связи — показываем данные из телефона${savedAt ? ` от ${fmtDateTime(savedAt)}` : ''}. Отметки сохранятся и уйдут позже.`}
+  />
 );
 
 const Shell: React.FC<{
   user: SessionUser | null;
   onLogout: () => void;
   children: React.ReactNode;
-}> = ({ user, onLogout, children }) => (
-  <div className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
-    <header className="sticky top-0 z-10 flex items-center gap-3 border-b border-[var(--border)] bg-[var(--bg)]/95 px-4 py-3 backdrop-blur">
-      <button
-        type="button"
-        onClick={() => go('/')}
-        className="flex items-center gap-2 text-left"
-        aria-label="На главную"
-      >
-        <span className="grid h-9 w-9 place-items-center rounded-lg bg-[var(--acc)] text-sm font-bold text-white">
-          360
-        </span>
-        <span className="text-sm font-semibold leading-tight">
-          Склад
-          <span className="block text-xs font-normal text-[var(--muted2)]">полевой режим</span>
-        </span>
-      </button>
-      {user && (
+}> = ({ user, onLogout, children }) => {
+  const online = useOnline();
+  const { pending, failed } = useQueue();
+  const waiting = pending.length + failed.length;
+
+  return (
+    <div className="min-h-screen bg-[var(--bg)] text-[var(--text)]">
+      <header className="sticky top-0 z-10 flex items-center gap-3 border-b border-[var(--border)] bg-[var(--bg)]/95 px-4 py-3 backdrop-blur">
         <button
           type="button"
-          onClick={onLogout}
-          className="ml-auto text-right text-xs text-[var(--muted)]"
+          onClick={() => go('/')}
+          className="flex items-center gap-2 text-left"
+          aria-label="На главную"
         >
-          {user.name}
-          <span className="block text-[var(--muted2)]">выйти</span>
+          <span className="grid h-9 w-9 place-items-center rounded-lg bg-[var(--acc)] text-sm font-bold text-white">
+            360
+          </span>
+          <span className="text-sm font-semibold leading-tight">
+            Склад
+            <span className="block text-xs font-normal text-[var(--muted2)]">
+              {online ? 'полевой режим' : 'без связи'}
+            </span>
+          </span>
         </button>
-      )}
-    </header>
-    <main className="mx-auto flex w-full max-w-lg flex-col gap-4 px-4 py-5 pb-16">{children}</main>
-  </div>
-);
+
+        <div className="ml-auto flex items-center gap-3">
+          {waiting > 0 && (
+            <button
+              type="button"
+              onClick={() => go('/queue')}
+              className="rounded-full px-3 py-1.5 text-xs font-semibold"
+              style={{
+                background: failed.length > 0 ? 'var(--bad-dim)' : 'var(--warn-dim)',
+                color: failed.length > 0 ? 'var(--bad)' : 'var(--warn)'
+              }}
+            >
+              {waiting} ждёт отправки
+            </button>
+          )}
+          {user && (
+            <button type="button" onClick={onLogout} className="text-right text-xs text-[var(--muted)]">
+              {user.name}
+              <span className="block text-[var(--muted2)]">выйти</span>
+            </button>
+          )}
+        </div>
+      </header>
+      <main className="mx-auto flex w-full max-w-lg flex-col gap-4 px-4 py-5 pb-16">{children}</main>
+    </div>
+  );
+};
 
 const LoginScreen: React.FC<{ onDone: (user: SessionUser) => void }> = ({ onDone }) => {
   const [phone, setPhone] = useState('');
   const [pin, setPin] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const online = useOnline();
 
   const submit = async (event: React.FormEvent) => {
     event.preventDefault();
@@ -179,6 +248,12 @@ const LoginScreen: React.FC<{ onDone: (user: SessionUser) => void }> = ({ onDone
           Телефон и PIN выдаёт руководитель. PIN — шесть цифр.
         </p>
       </div>
+      {!online && (
+        <Notice
+          tone="warn"
+          text="Нет связи. Для первого входа нужна сеть — дальше приложение работает и без неё."
+        />
+      )}
       <label className="flex flex-col gap-1 text-sm text-[var(--muted)]">
         Телефон
         <input
@@ -214,20 +289,116 @@ const LoginScreen: React.FC<{ onDone: (user: SessionUser) => void }> = ({ onDone
   );
 };
 
+const QueueScreen: React.FC = () => {
+  const { pending, failed } = useQueue();
+  const [busy, setBusy] = useState(false);
+  const [message, setMessage] = useState('');
+  const online = useOnline();
+
+  const send = async () => {
+    setBusy(true);
+    setMessage('');
+    const report = await syncNow();
+    setMessage(
+      report.sent === 0 && report.stopped
+        ? 'Связи всё ещё нет — отметки остались в телефоне'
+        : `Отправлено: ${report.sent}${report.failed > 0 ? `, отклонено: ${report.failed}` : ''}`
+    );
+    setBusy(false);
+  };
+
+  return (
+    <>
+      <div>
+        <h1 className="text-lg font-bold">Ждут отправки</h1>
+        <p className="mt-1 text-sm text-[var(--muted)]">
+          Отметки хранятся в телефоне и уходят сами, когда появляется сеть. Порядок сохраняется.
+        </p>
+      </div>
+
+      {message && <Notice text={message} tone="ok" />}
+
+      {pending.length === 0 && failed.length === 0 && (
+        <Notice text="Всё отправлено, очередь пуста" tone="ok" />
+      )}
+
+      {pending.length > 0 && (
+        <section className="flex flex-col gap-2">
+          <h2 className="px-1 text-sm font-semibold uppercase tracking-wide text-[var(--muted2)]">
+            В очереди · {pending.length}
+          </h2>
+          {pending.map((entry) => (
+            <div
+              key={entry.id}
+              className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-3 py-2 text-sm"
+            >
+              <p className="font-medium">{entry.label}</p>
+              <p className="text-xs text-[var(--muted2)]">
+                отмечено {fmtDateTime(entry.occurredAt)}
+                {entry.attempts > 0 && ` · попыток: ${entry.attempts}`}
+              </p>
+            </div>
+          ))}
+          <Button tone="accent" disabled={busy || !online} onClick={send}>
+            {online ? 'Отправить сейчас' : 'Нет связи'}
+          </Button>
+        </section>
+      )}
+
+      {failed.length > 0 && (
+        <section className="flex flex-col gap-2">
+          <h2 className="px-1 text-sm font-semibold uppercase tracking-wide text-[var(--bad)]">
+            Сервер не принял · {failed.length}
+          </h2>
+          <p className="px-1 text-sm text-[var(--muted)]">
+            Обычно это значит, что кто-то уже отметил то же самое. Покажите список руководителю,
+            если не уверены.
+          </p>
+          {failed.map((entry) => (
+            <div
+              key={entry.id}
+              className="rounded-2xl border border-[var(--bad)] bg-[var(--bad-dim)] px-3 py-2 text-sm"
+            >
+              <p className="font-medium">{entry.label}</p>
+              <p className="text-xs" style={{ color: 'var(--bad)' }}>
+                {entry.error}
+              </p>
+              <p className="text-xs text-[var(--muted2)]">отмечено {fmtDateTime(entry.occurredAt)}</p>
+            </div>
+          ))}
+          <div className="flex gap-2">
+            <Button disabled={busy} onClick={() => void retryFailed()}>
+              Попробовать снова
+            </Button>
+            <Button tone="danger" disabled={busy} onClick={dropFailed}>
+              Убрать
+            </Button>
+          </div>
+        </section>
+      )}
+    </>
+  );
+};
+
 const HomeScreen: React.FC = () => {
   const [code, setCode] = useState('');
   const [kits, setKits] = useState<Kit[] | null>(null);
+  const [stale, setStale] = useState<{ savedAt: string | null } | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
-    api
-      .kits()
-      .then(setKits)
+    loadKits()
+      .then((result) => {
+        setKits(result.data);
+        setStale(result.stale ? { savedAt: result.savedAt } : null);
+      })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Не удалось загрузить'));
   }, []);
 
   return (
     <>
+      {stale && <StaleBanner savedAt={stale.savedAt} />}
+
       <section className="flex flex-col gap-3 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4">
         <h1 className="text-lg font-bold">Найти оборудование</h1>
         <p className="text-sm text-[var(--muted)]">
@@ -297,13 +468,16 @@ const HomeScreen: React.FC = () => {
 
 const StockScreen: React.FC = () => {
   const [items, setItems] = useState<Equipment[] | null>(null);
+  const [stale, setStale] = useState<{ savedAt: string | null } | null>(null);
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
 
   useEffect(() => {
-    api
-      .equipmentList()
-      .then(setItems)
+    loadEquipmentList()
+      .then((result) => {
+        setItems(result.data);
+        setStale(result.stale ? { savedAt: result.savedAt } : null);
+      })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Не удалось загрузить'));
   }, []);
 
@@ -314,6 +488,7 @@ const StockScreen: React.FC = () => {
   return (
     <>
       <h1 className="text-lg font-bold">Склад</h1>
+      {stale && <StaleBanner savedAt={stale.savedAt} />}
       <input
         value={search}
         onChange={(e) => setSearch(e.target.value)}
@@ -355,6 +530,7 @@ const StockScreen: React.FC = () => {
 const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
   const [item, setItem] = useState<Equipment | null>(null);
   const [history, setHistory] = useState<HistoryEvent[]>([]);
+  const [stale, setStale] = useState<{ savedAt: string | null } | null>(null);
   const [error, setError] = useState('');
   const [done, setDone] = useState('');
   const [busy, setBusy] = useState(false);
@@ -365,9 +541,11 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
   const load = useCallback(async () => {
     setError('');
     try {
-      const found = await api.equipmentByCode(code);
-      setItem(found);
-      setHistory(await api.history(found.id));
+      const found = await loadEquipmentByCode(code);
+      setItem(found.data);
+      setStale(found.stale ? { savedAt: found.savedAt } : null);
+      const events = await loadHistory(found.data.id);
+      setHistory(events.data);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Не удалось загрузить карточку');
     }
@@ -377,13 +555,13 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
     void load();
   }, [load]);
 
-  const act = async (fn: () => Promise<unknown>, message: string) => {
+  const act = async (run: () => Promise<{ queued: boolean }>, message: string) => {
     setBusy(true);
     setError('');
     setDone('');
     try {
-      await fn();
-      setDone(message);
+      const result = await run();
+      setDone(result.queued ? `${message}. ${QUEUED_HINT}` : message);
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Не получилось');
@@ -399,6 +577,8 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
 
   return (
     <>
+      {stale && <StaleBanner savedAt={stale.savedAt} />}
+
       <section className="rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4">
         <div className="flex items-center gap-2">
           <span
@@ -440,7 +620,17 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
         <Button
           tone="ok"
           disabled={busy}
-          onClick={() => act(() => api.check(item.id), 'Проверка отмечена сегодняшним днём')}
+          onClick={() =>
+            act(
+              () =>
+                perform({
+                  path: `/api/v1/equipment/${item.id}/check`,
+                  label: `${item.code} · проверка`,
+                  apply: optimistic.check(item.id)
+                }),
+              'Проверка отмечена'
+            )
+          }
         >
           Проверено
         </Button>
@@ -487,10 +677,16 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
                 disabled={busy || defectText.trim().length < 3}
                 onClick={() =>
                   act(async () => {
-                    await api.reportDefect(item.id, severity, defectText.trim());
+                    const result = await perform({
+                      path: `/api/v1/equipment/${item.id}/defects`,
+                      body: { severity, description: defectText.trim() },
+                      label: `${item.code} · дефект`,
+                      apply: optimistic.defect(item.id, item.openDefects)
+                    });
                     setDefectOpen(false);
                     setDefectText('');
-                  }, 'Дефект записан, ответственный увидит его в списке')
+                    return result;
+                  }, 'Дефект записан')
                 }
               >
                 Отправить
@@ -505,7 +701,13 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
             disabled={busy}
             onClick={() =>
               act(
-                () => api.setStatus(item.id, 'repair', null, 'Отправлено в ремонт с площадки'),
+                () =>
+                  perform({
+                    path: `/api/v1/equipment/${item.id}/status`,
+                    body: { status: 'repair', projectId: null, note: 'Отправлено в ремонт с площадки' },
+                    label: `${item.code} · в ремонт`,
+                    apply: optimistic.status(item.id, 'repair')
+                  }),
                 'Единица уехала в ремонт'
               )
             }
@@ -516,7 +718,16 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
           <Button
             disabled={busy}
             onClick={() =>
-              act(() => api.setStatus(item.id, 'stock', null, 'Вернулось из ремонта'), 'На складе')
+              act(
+                () =>
+                  perform({
+                    path: `/api/v1/equipment/${item.id}/status`,
+                    body: { status: 'stock', projectId: null, note: 'Вернулось из ремонта' },
+                    label: `${item.code} · на склад`,
+                    apply: optimistic.status(item.id, 'stock')
+                  }),
+                'На складе'
+              )
             }
           >
             Вернуть из ремонта на склад
@@ -528,6 +739,9 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
         <h2 className="px-1 text-sm font-semibold uppercase tracking-wide text-[var(--muted2)]">
           История
         </h2>
+        {stale && history.length === 0 && (
+          <p className="px-1 text-sm text-[var(--muted)]">История появится, когда будет связь.</p>
+        )}
         <ol className="flex flex-col gap-2">
           {history.slice(0, 12).map((event) => (
             <li
@@ -536,7 +750,7 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
             >
               <div className="flex justify-between gap-2 text-xs text-[var(--muted2)]">
                 <span>{EVENT_LABEL[event.kind] ?? event.kind}</span>
-                <span>{fmtDateTime(event.createdAt)}</span>
+                <span>{fmtDateTime(event.occurredAt ?? event.createdAt)}</span>
               </div>
               <p className="mt-1">
                 {event.userName ?? 'система'}
@@ -559,6 +773,7 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
 
 const KitScreen: React.FC<{ id: string }> = ({ id }) => {
   const [kit, setKit] = useState<Kit | null>(null);
+  const [stale, setStale] = useState<{ savedAt: string | null } | null>(null);
   const [error, setError] = useState('');
   const [done, setDone] = useState('');
   const [busy, setBusy] = useState(false);
@@ -566,7 +781,9 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
 
   const load = useCallback(async () => {
     try {
-      setKit(await api.kit(id));
+      const result = await loadKit(id);
+      setKit(result.data);
+      setStale(result.stale ? { savedAt: result.savedAt } : null);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Не удалось загрузить комплект');
     }
@@ -576,13 +793,13 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
     void load();
   }, [load]);
 
-  const act = async (fn: () => Promise<unknown>, message: string) => {
+  const act = async (run: () => Promise<{ queued: boolean }>, message: string) => {
     setBusy(true);
     setError('');
     setDone('');
     try {
-      await fn();
-      setDone(message);
+      const result = await run();
+      setDone(result.queued ? `${message}. ${QUEUED_HINT}` : message);
       await load();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Не получилось');
@@ -594,8 +811,28 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
   if (error && !kit) return <Notice text={error} tone="error" />;
   if (!kit) return <p className="text-sm text-[var(--muted)]">Загружаем…</p>;
 
+  const checkin = (equipmentId: string, code: string, state: 'ok' | 'damaged' | 'missing') => {
+    const words = {
+      ok: 'принято на склад',
+      damaged: 'ушло в ремонт, дефект заведён',
+      missing: 'отмечено как не вернувшееся'
+    };
+    return act(async () => {
+      const result = await perform({
+        path: `/api/v1/kits/${kit.id}/checkin`,
+        body: { equipmentId, returnState: state },
+        label: `${code} · приём (${state === 'ok' ? 'целое' : state === 'damaged' ? 'повреждено' : 'не вернулось'})`,
+        apply: optimistic.checkin(kit.id, equipmentId, state)
+      });
+      setReturning(null);
+      return result;
+    }, `${code}: ${words[state]}`);
+  };
+
   return (
     <>
+      {stale && <StaleBanner savedAt={stale.savedAt} />}
+
       <section className="rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4">
         <span className="font-mono text-xs text-[var(--muted2)]">{kit.projectCode}</span>
         <h1 className="text-xl font-bold leading-snug">{kit.name}</h1>
@@ -638,7 +875,16 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
                 tone="accent"
                 disabled={busy}
                 onClick={() =>
-                  act(() => api.checkout(kit.id, item.equipmentId), `${item.code}: погружено`)
+                  act(
+                    () =>
+                      perform({
+                        path: `/api/v1/kits/${kit.id}/checkout`,
+                        body: { equipmentId: item.equipmentId },
+                        label: `${item.code} · погрузка`,
+                        apply: optimistic.checkout(kit.id, item.equipmentId)
+                      }),
+                    `${item.code}: погружено`
+                  )
                 }
               >
                 Погрузили
@@ -657,36 +903,21 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
                 <Button
                   tone="ok"
                   disabled={busy}
-                  onClick={() =>
-                    act(async () => {
-                      await api.checkin(kit.id, item.equipmentId, 'ok');
-                      setReturning(null);
-                    }, `${item.code}: принято на склад`)
-                  }
+                  onClick={() => checkin(item.equipmentId, item.code, 'ok')}
                 >
                   Целое
                 </Button>
                 <Button
                   tone="danger"
                   disabled={busy}
-                  onClick={() =>
-                    act(async () => {
-                      await api.checkin(kit.id, item.equipmentId, 'damaged');
-                      setReturning(null);
-                    }, `${item.code}: ушло в ремонт, дефект заведён`)
-                  }
+                  onClick={() => checkin(item.equipmentId, item.code, 'damaged')}
                 >
                   Повреждено
                 </Button>
                 <Button
                   tone="danger"
                   disabled={busy}
-                  onClick={() =>
-                    act(async () => {
-                      await api.checkin(kit.id, item.equipmentId, 'missing');
-                      setReturning(null);
-                    }, `${item.code}: отмечено как не вернувшееся`)
-                  }
+                  onClick={() => checkin(item.equipmentId, item.code, 'missing')}
                 >
                   Не вернулось
                 </Button>
@@ -722,7 +953,9 @@ export const FieldApp: React.FC = () => {
     return () => window.removeEventListener('hashchange', onHash);
   }, []);
 
-  // Токен мог протухнуть за месяц — проверяем его до того, как показать экраны.
+  // Токен живёт месяц, но мог протухнуть. Проверяем — и только если сервер
+  // прямо сказал «не пущу», выкидываем на вход: без связи пользователь
+  // остаётся в приложении и работает по кешу.
   useEffect(() => {
     if (!getToken()) {
       setChecked(true);
@@ -731,12 +964,16 @@ export const FieldApp: React.FC = () => {
     api
       .me()
       .then(setUser)
-      .catch(() => {
-        clearSession();
-        setUser(null);
+      .catch((err) => {
+        if (err instanceof ApiError && err.status === 401) {
+          clearSession();
+          setUser(null);
+        }
       })
       .finally(() => setChecked(true));
   }, []);
+
+  useEffect(() => (user ? startAutoSync() : undefined), [user]);
 
   const logout = () => {
     clearSession();
@@ -774,6 +1011,7 @@ export const FieldApp: React.FC = () => {
     <Shell user={user} onLogout={logout}>
       {route.name === 'home' && <HomeScreen />}
       {route.name === 'stock' && <StockScreen />}
+      {route.name === 'queue' && <QueueScreen />}
       {route.name === 'equipment' && <EquipmentScreen code={route.code} />}
       {route.name === 'kit' && <KitScreen id={route.id} />}
     </Shell>

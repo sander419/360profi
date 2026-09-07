@@ -14,7 +14,8 @@
     "clean": "rm -rf dist server.js",
     "api": "npm --prefix server run dev",
     "api:seed": "npm --prefix server run seed",
-    "api:test": "npm --prefix server test"
+    "api:test": "npm --prefix server test",
+    "test": "node --test \"test/*.test.ts\""
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

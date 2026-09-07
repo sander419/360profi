@@ -47,14 +47,13 @@ const seedFixtures = (database: DatabaseSync): void => {
 const call = (
   method: 'GET' | 'POST' | 'PATCH' | 'DELETE',
   url: string,
-  options: { token?: string; body?: unknown } = {}
-) =>
-  app.inject({
-    method,
-    url,
-    headers: options.token ? { authorization: `Bearer ${options.token}` } : {},
-    payload: options.body as object | undefined
-  });
+  options: { token?: string; body?: unknown; key?: string } = {}
+) => {
+  const headers: Record<string, string> = {};
+  if (options.token) headers.authorization = `Bearer ${options.token}`;
+  if (options.key) headers['idempotency-key'] = options.key;
+  return app.inject({ method, url, headers, payload: options.body as object | undefined });
+};
 
 before(async () => {
   db = openDb(':memory:');
@@ -269,6 +268,76 @@ describe('комплект на выезд', () => {
       body: { equipmentId: ids.broken, returnState: 'ok' }
     });
     assert.equal(res.statusCode, 400);
+  });
+});
+
+describe('работа без связи', () => {
+  test('повтор с тем же ключом не применяется дважды', async () => {
+    const key = 'op-' + uid();
+    const body = { severity: 'low', description: 'Скол на корпусе' };
+
+    const first = await call('POST', `/api/v1/equipment/${ids.camera}/defects`, {
+      token: tokens.tech,
+      body,
+      key
+    });
+    assert.equal(first.statusCode, 201);
+
+    const repeat = await call('POST', `/api/v1/equipment/${ids.camera}/defects`, {
+      token: tokens.tech,
+      body,
+      key
+    });
+    assert.equal(repeat.statusCode, 201);
+    assert.equal(repeat.headers['idempotent-replay'], 'true');
+    assert.deepEqual(repeat.json(), first.json(), 'повтор отдаёт сохранённый ответ');
+
+    const item = await call('GET', `/api/v1/equipment/${ids.camera}`, { token: tokens.tech });
+    assert.equal(item.json().item.openDefects, 1, 'дефект должен быть один');
+  });
+
+  test('разные ключи — разные операции', async () => {
+    await call('POST', `/api/v1/equipment/${ids.camera}/defects`, {
+      token: tokens.tech,
+      body: { severity: 'low', description: 'Второй скол' },
+      key: 'op-' + uid()
+    });
+    const item = await call('GET', `/api/v1/equipment/${ids.camera}`, { token: tokens.tech });
+    assert.equal(item.json().item.openDefects, 2);
+  });
+
+  test('отметка, сделанная вчера без связи, остаётся вчерашней', async () => {
+    const yesterday = new Date(Date.now() - 86400000);
+    const res = await call('POST', `/api/v1/equipment/${ids.broken}/check`, {
+      token: tokens.tech,
+      body: { note: 'осмотр на площадке', occurredAt: yesterday.toISOString() }
+    });
+    assert.equal(res.statusCode, 200);
+
+    const expected = `${yesterday.getFullYear()}-${String(yesterday.getMonth() + 1).padStart(2, '0')}-${String(yesterday.getDate()).padStart(2, '0')}`;
+    assert.equal(res.json().item.lastCheckOn, expected);
+
+    const history = await call('GET', `/api/v1/equipment/${ids.broken}/history`, {
+      token: tokens.tech
+    });
+    const last = history.json().events[0];
+    assert.equal(last.kind, 'check');
+    assert.ok(
+      new Date(last.occurredAt).getTime() < new Date(last.createdAt).getTime(),
+      'время на площадке должно быть раньше времени записи на сервере'
+    );
+  });
+
+  test('время из будущего игнорируется, берётся серверное', async () => {
+    const future = new Date(Date.now() + 5 * 86400000).toISOString();
+    const res = await call('POST', `/api/v1/equipment/${ids.broken}/check`, {
+      token: tokens.tech,
+      body: { occurredAt: future }
+    });
+    assert.equal(res.statusCode, 200);
+    const today = new Date();
+    const expected = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    assert.equal(res.json().item.lastCheckOn, expected);
   });
 });
 

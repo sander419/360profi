@@ -3,7 +3,14 @@
 
 import type { FastifyInstance } from 'fastify';
 import { nowIso, uid } from '../db.ts';
-import { DomainError, changeStatus, getEquipment, openDefect, logEvent } from '../domain.ts';
+import {
+  DomainError,
+  changeStatus,
+  getEquipment,
+  openDefect,
+  logEvent,
+  sanitizeOccurredAt
+} from '../domain.ts';
 
 interface KitRow {
   id: string;
@@ -192,14 +199,16 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
           required: ['equipmentId'],
           properties: {
             equipmentId: { type: 'string' },
-            note: { type: 'string', maxLength: 500 }
+            note: { type: 'string', maxLength: 500 },
+            occurredAt: { type: 'string', maxLength: 40 }
           }
         }
       }
     },
     async (req) => {
       const { id } = req.params as { id: string };
-      const body = req.body as { equipmentId: string; note?: string };
+      const body = req.body as { equipmentId: string; note?: string; occurredAt?: string };
+      const occurredAt = sanitizeOccurredAt(body.occurredAt);
       const kit = getKit(db, id);
 
       const item = db
@@ -218,7 +227,7 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
 
       db.prepare(
         'UPDATE kit_items SET checked_out_at = ?, checked_out_by = ?, note = ? WHERE kit_id = ? AND equipment_id = ?'
-      ).run(nowIso(), req.user!.id, body.note ?? '', id, body.equipmentId);
+      ).run(occurredAt ?? nowIso(), req.user!.id, body.note ?? '', id, body.equipmentId);
 
       changeStatus(db, {
         equipmentId: body.equipmentId,
@@ -226,7 +235,8 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
         projectId: kit.project_id,
         userId: req.user!.id,
         note: `Погрузка: ${kit.name}`,
-        kind: 'kit_out'
+        kind: 'kit_out',
+        occurredAt
       });
 
       return { kit: kitPayload(db, kit) };
@@ -246,7 +256,8 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
           properties: {
             equipmentId: { type: 'string' },
             returnState: { type: 'string', enum: ['ok', 'damaged', 'missing'] },
-            note: { type: 'string', maxLength: 500 }
+            note: { type: 'string', maxLength: 500 },
+            occurredAt: { type: 'string', maxLength: 40 }
           }
         }
       }
@@ -257,7 +268,9 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
         equipmentId: string;
         returnState: 'ok' | 'damaged' | 'missing';
         note?: string;
+        occurredAt?: string;
       };
+      const occurredAt = sanitizeOccurredAt(body.occurredAt);
       const kit = getKit(db, id);
 
       const item = db
@@ -274,7 +287,7 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
       db.prepare(
         `UPDATE kit_items SET checked_in_at = ?, checked_in_by = ?, return_state = ?, note = ?
           WHERE kit_id = ? AND equipment_id = ?`
-      ).run(nowIso(), req.user!.id, body.returnState, body.note ?? '', id, body.equipmentId);
+      ).run(occurredAt ?? nowIso(), req.user!.id, body.returnState, body.note ?? '', id, body.equipmentId);
 
       if (body.returnState === 'missing') {
         logEvent(db, {
@@ -282,13 +295,15 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
           kind: 'kit_in',
           projectId: kit.project_id,
           userId: req.user!.id,
-          note: `Не вернулось с проекта: ${body.note ?? ''}`.trim()
+          note: `Не вернулось с проекта: ${body.note ?? ''}`.trim(),
+          occurredAt
         });
         openDefect(db, {
           equipmentId: body.equipmentId,
           severity: 'blocker',
           description: `Не вернулось с выезда «${kit.name}». ${body.note ?? ''}`.trim(),
-          userId: req.user!.id
+          userId: req.user!.id,
+          occurredAt
         });
       } else {
         changeStatus(db, {
@@ -297,7 +312,8 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
           projectId: null,
           userId: req.user!.id,
           note: `Возврат: ${kit.name}. ${body.note ?? ''}`.trim(),
-          kind: 'kit_in'
+          kind: 'kit_in',
+          occurredAt
         });
 
         if (body.returnState === 'damaged') {
@@ -305,7 +321,8 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
             equipmentId: body.equipmentId,
             severity: 'high',
             description: `Повреждение при возврате с выезда «${kit.name}». ${body.note ?? ''}`.trim(),
-            userId: req.user!.id
+            userId: req.user!.id,
+            occurredAt
           });
         }
       }

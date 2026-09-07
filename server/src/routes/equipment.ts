@@ -9,6 +9,7 @@ import {
   markChecked,
   openDefect,
   openDefectCounts,
+  sanitizeOccurredAt,
   serializeEquipment
 } from '../domain.ts';
 import type { EquipmentRow, EquipmentStatus } from '../domain.ts';
@@ -117,7 +118,8 @@ export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
         projectCode: e.project_code,
         userName: e.user_name,
         note: e.note,
-        createdAt: e.created_at
+        createdAt: e.created_at,
+        occurredAt: e.occurred_at ?? e.created_at
       }))
     };
   });
@@ -238,20 +240,27 @@ export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
           properties: {
             status: { type: 'string', enum: EQUIPMENT_STATUSES },
             projectId: { type: ['string', 'null'] },
-            note: { type: 'string', maxLength: 500 }
+            note: { type: 'string', maxLength: 500 },
+            occurredAt: { type: 'string', maxLength: 40 }
           }
         }
       }
     },
     async (req) => {
       const { id } = req.params as { id: string };
-      const body = req.body as { status: EquipmentStatus; projectId?: string | null; note?: string };
+      const body = req.body as {
+        status: EquipmentStatus;
+        projectId?: string | null;
+        note?: string;
+        occurredAt?: string;
+      };
       const row = changeStatus(db, {
         equipmentId: id,
         status: body.status,
         projectId: body.projectId,
         userId: req.user!.id,
-        note: body.note
+        note: body.note,
+        occurredAt: sanitizeOccurredAt(body.occurredAt)
       });
       return { item: serializeEquipment(row) };
     }
@@ -264,14 +273,22 @@ export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
       schema: {
         body: {
           type: 'object',
-          properties: { note: { type: 'string', maxLength: 500 } }
+          properties: {
+            note: { type: 'string', maxLength: 500 },
+            occurredAt: { type: 'string', maxLength: 40 }
+          }
         }
       }
     },
     async (req) => {
       const { id } = req.params as { id: string };
-      const { note } = (req.body ?? {}) as { note?: string };
-      const row = markChecked(db, { equipmentId: id, userId: req.user!.id, note });
+      const { note, occurredAt } = (req.body ?? {}) as { note?: string; occurredAt?: string };
+      const row = markChecked(db, {
+        equipmentId: id,
+        userId: req.user!.id,
+        note,
+        occurredAt: sanitizeOccurredAt(occurredAt)
+      });
       return { item: serializeEquipment(row) };
     }
   );
@@ -286,19 +303,25 @@ export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
           required: ['severity', 'description'],
           properties: {
             severity: { type: 'string', enum: ['low', 'high', 'blocker'] },
-            description: { type: 'string', minLength: 1, maxLength: 1000 }
+            description: { type: 'string', minLength: 1, maxLength: 1000 },
+            occurredAt: { type: 'string', maxLength: 40 }
           }
         }
       }
     },
     async (req, reply) => {
       const { id } = req.params as { id: string };
-      const body = req.body as { severity: 'low' | 'high' | 'blocker'; description: string };
+      const body = req.body as {
+        severity: 'low' | 'high' | 'blocker';
+        description: string;
+        occurredAt?: string;
+      };
       const defect = openDefect(db, {
         equipmentId: id,
         severity: body.severity,
         description: body.description,
-        userId: req.user!.id
+        userId: req.user!.id,
+        occurredAt: sanitizeOccurredAt(body.occurredAt)
       });
       return reply.code(201).send(defect);
     }

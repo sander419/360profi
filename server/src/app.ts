@@ -9,6 +9,7 @@ import { openDb, defaultDbPath } from './db.ts';
 import { loadSecret, verifyToken } from './auth.ts';
 import type { Role, SessionUser } from './auth.ts';
 import { DomainError } from './domain.ts';
+import { registerIdempotency, purgeOldOperations } from './idempotency.ts';
 import { authRoutes } from './routes/auth.ts';
 import { equipmentRoutes } from './routes/equipment.ts';
 import { kitRoutes } from './routes/kits.ts';
@@ -47,6 +48,8 @@ export const buildApp = async (options: BuildOptions = {}): Promise<FastifyInsta
     origin: origin === '*' ? true : origin.split(',').map((o) => o.trim())
   });
 
+  purgeOldOperations(db);
+
   app.decorate('ctx', { db, secret });
   app.decorateRequest('user', null);
 
@@ -68,6 +71,8 @@ export const buildApp = async (options: BuildOptions = {}): Promise<FastifyInsta
       await reply.code(403).send({ error: 'Недостаточно прав' });
     }
   });
+
+  registerIdempotency(app, db);
 
   app.setErrorHandler((err: FastifyError, req, reply) => {
     if (err instanceof DomainError) {

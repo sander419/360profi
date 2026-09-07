@@ -1,0 +1,408 @@
+// Работа без связи: локальный кеш для чтения, очередь отметок для записи.
+//
+// Логика простая и намеренно консервативная. Отметка, сделанная в подвале без
+// сети, обязана дойти до сервера ровно один раз, в том же порядке и с тем
+// временем, когда её сделали, — иначе журнал перестаёт быть доказательством.
+
+import { API_URL, ApiError, apiConfigured, clearSession, getToken } from './client.ts';
+import type { Equipment, HistoryEvent, Kit } from './client.ts';
+import { Outbox } from './outbox.ts';
+import type { OutboxEntry, OutboxStorage, SendResult } from './outbox.ts';
+
+const CACHE_KEY = 'profi360_cache_v1';
+const OUTBOX_KEY = 'profi360_outbox_v1';
+
+const localStorageAdapter = (key: string): OutboxStorage => ({
+  read: () => {
+    try {
+      return localStorage.getItem(key);
+    } catch {
+      return null;
+    }
+  },
+  write: (value) => {
+    try {
+      localStorage.setItem(key, value);
+    } catch {
+      // приватный режим или кончилось место
+    }
+  }
+});
+
+export const outbox = new Outbox(localStorageAdapter(OUTBOX_KEY));
+
+// --- кеш чтения -------------------------------------------------------------
+
+interface CacheShape {
+  equipment: Record<string, Equipment>;
+  kits: Record<string, Kit>;
+  savedAt: string | null;
+}
+
+const emptyCache: CacheShape = { equipment: {}, kits: {}, savedAt: null };
+
+const readCache = (): CacheShape => {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return { ...emptyCache };
+    const parsed = JSON.parse(raw) as CacheShape;
+    return {
+      equipment: parsed.equipment ?? {},
+      kits: parsed.kits ?? {},
+      savedAt: parsed.savedAt ?? null
+    };
+  } catch {
+    return { ...emptyCache };
+  }
+};
+
+const writeCache = (cache: CacheShape): void => {
+  try {
+    localStorage.setItem(CACHE_KEY, JSON.stringify({ ...cache, savedAt: new Date().toISOString() }));
+  } catch {
+    // кеш — удобство, а не данные: молча переживаем нехватку места
+  }
+};
+
+const cacheEquipment = (items: Equipment[]): void => {
+  const cache = readCache();
+  for (const item of items) cache.equipment[item.id] = item;
+  writeCache(cache);
+};
+
+const cacheKit = (kit: Kit): void => {
+  const cache = readCache();
+  cache.kits[kit.id] = kit;
+  writeCache(cache);
+};
+
+const patchEquipment = (id: string, patch: Partial<Equipment>): void => {
+  const cache = readCache();
+  const current = cache.equipment[id];
+  if (!current) return;
+  cache.equipment[id] = { ...current, ...patch };
+  writeCache(cache);
+};
+
+const recount = (kit: Kit): Kit => {
+  const loaded = kit.items.filter((i) => i.checkedOutAt).length;
+  const returned = kit.items.filter((i) => i.checkedInAt).length;
+  return {
+    ...kit,
+    progress: {
+      total: kit.items.length,
+      loaded,
+      returned,
+      readiness: kit.items.length === 0 ? 0 : Math.round((loaded / kit.items.length) * 100)
+    }
+  };
+};
+
+const patchKitItem = (
+  kitId: string,
+  equipmentId: string,
+  patch: Partial<Kit['items'][number]>
+): void => {
+  const cache = readCache();
+  const kit = cache.kits[kitId];
+  if (!kit) return;
+  cache.kits[kitId] = recount({
+    ...kit,
+    items: kit.items.map((i) => (i.equipmentId === equipmentId ? { ...i, ...patch } : i))
+  });
+  writeCache(cache);
+};
+
+export const cacheSavedAt = (): string | null => readCache().savedAt;
+
+// --- чтение с подстраховкой кешем -------------------------------------------
+
+export interface Loaded<T> {
+  data: T;
+  /** Данные из кеша: сеть недоступна. */
+  stale: boolean;
+  savedAt: string | null;
+}
+
+const fresh = <T,>(data: T): Loaded<T> => ({ data, stale: false, savedAt: null });
+
+const isOffline = (err: unknown): boolean => err instanceof ApiError && err.status === 0;
+
+const authHeaders = (): Record<string, string> => {
+  const token = getToken();
+  return token ? { authorization: `Bearer ${token}` } : {};
+};
+
+const get = async <T,>(path: string): Promise<T> => {
+  if (!apiConfigured()) throw new ApiError('Адрес сервера не настроен', 0);
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, { headers: authHeaders() });
+  } catch {
+    throw new ApiError('Сервер недоступен', 0);
+  }
+  if (res.status === 401) {
+    clearSession();
+    throw new ApiError('Нужен вход в систему', 401);
+  }
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!res.ok) throw new ApiError(data.error ?? `Ошибка ${res.status}`, res.status);
+  return data as T;
+};
+
+export const loadEquipmentList = async (): Promise<Loaded<Equipment[]>> => {
+  try {
+    const { items } = await get<{ items: Equipment[] }>('/api/v1/equipment');
+    cacheEquipment(items);
+    return fresh(items);
+  } catch (err) {
+    if (!isOffline(err)) throw err;
+    const cache = readCache();
+    return { data: Object.values(cache.equipment), stale: true, savedAt: cache.savedAt };
+  }
+};
+
+export const loadEquipmentByCode = async (code: string): Promise<Loaded<Equipment>> => {
+  try {
+    const { item } = await get<{ item: Equipment }>(
+      `/api/v1/equipment/by-code/${encodeURIComponent(code)}`
+    );
+    cacheEquipment([item]);
+    return fresh(item);
+  } catch (err) {
+    if (!isOffline(err)) throw err;
+    const cache = readCache();
+    const found = Object.values(cache.equipment).find((i) => i.code === code);
+    if (!found) {
+      throw new ApiError(
+        `Нет связи, а ${code} не сохранён в телефоне. Откройте список склада, когда будет сеть.`,
+        0
+      );
+    }
+    return { data: found, stale: true, savedAt: cache.savedAt };
+  }
+};
+
+export const loadHistory = async (id: string): Promise<Loaded<HistoryEvent[]>> => {
+  try {
+    const { events } = await get<{ events: HistoryEvent[] }>(`/api/v1/equipment/${id}/history`);
+    return fresh(events);
+  } catch (err) {
+    if (!isOffline(err)) throw err;
+    return { data: [], stale: true, savedAt: cacheSavedAt() };
+  }
+};
+
+export const loadKits = async (): Promise<Loaded<Kit[]>> => {
+  try {
+    const { kits } = await get<{ kits: Kit[] }>('/api/v1/kits');
+    const cache = readCache();
+    for (const kit of kits) cache.kits[kit.id] = kit;
+    writeCache(cache);
+    return fresh(kits);
+  } catch (err) {
+    if (!isOffline(err)) throw err;
+    const cache = readCache();
+    return { data: Object.values(cache.kits), stale: true, savedAt: cache.savedAt };
+  }
+};
+
+export const loadKit = async (id: string): Promise<Loaded<Kit>> => {
+  try {
+    const { kit } = await get<{ kit: Kit }>(`/api/v1/kits/${id}`);
+    cacheKit(kit);
+    return fresh(kit);
+  } catch (err) {
+    if (!isOffline(err)) throw err;
+    const cache = readCache();
+    const kit = cache.kits[id];
+    if (!kit) throw new ApiError('Нет связи, и этот выезд не сохранён в телефоне', 0);
+    return { data: kit, stale: true, savedAt: cache.savedAt };
+  }
+};
+
+// --- запись через очередь ----------------------------------------------------
+
+const sendEntry = async (entry: OutboxEntry): Promise<Response> => {
+  return fetch(`${API_URL}${entry.path}`, {
+    method: entry.method,
+    headers: {
+      'content-type': 'application/json',
+      // Ключ операции постоянен между попытками: сервер по нему отличает
+      // повтор от новой отметки.
+      'idempotency-key': entry.id,
+      ...authHeaders()
+    },
+    body: JSON.stringify(entry.body)
+  });
+};
+
+const trySend = async (entry: OutboxEntry): Promise<SendResult> => {
+  let res: Response;
+  try {
+    res = await sendEntry(entry);
+  } catch {
+    return { outcome: 'retry', error: 'Сервер недоступен' };
+  }
+
+  if (res.ok) return { outcome: 'sent' };
+
+  // 5xx и таймауты лечатся повтором, 4xx — нет: сервер отказал по существу.
+  if (res.status >= 500 || res.status === 408 || res.status === 429) {
+    return { outcome: 'retry', error: `Сервер ответил ${res.status}` };
+  }
+
+  let message = `Ошибка ${res.status}`;
+  try {
+    const data = JSON.parse(await res.text());
+    if (data.error) message = data.error;
+  } catch {
+    // тело без json — оставляем код
+  }
+  if (res.status === 401) {
+    clearSession();
+    message = 'Сессия истекла, войдите заново';
+  }
+  return { outcome: 'rejected', error: message };
+};
+
+export interface PerformResult {
+  queued: boolean;
+}
+
+export interface PerformOptions {
+  path: string;
+  body?: Record<string, unknown>;
+  /** Человеческое описание для экрана очереди. */
+  label: string;
+  /** Оптимистичная правка кеша, чтобы экран сразу показал результат. */
+  apply?: () => void;
+}
+
+const newId = (): string =>
+  typeof crypto !== 'undefined' && 'randomUUID' in crypto
+    ? crypto.randomUUID()
+    : `op-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+/**
+ * Выполняет действие: онлайн — сразу, без связи — кладёт в очередь.
+ * Бизнес-ошибку («уже отмечено») показываем человеку немедленно,
+ * пропажу связи — молча превращаем в отложенную отправку.
+ */
+export const perform = async (options: PerformOptions): Promise<PerformResult> => {
+  const occurredAt = new Date().toISOString();
+  const entry: OutboxEntry = {
+    id: newId(),
+    method: 'POST',
+    path: options.path,
+    body: { ...(options.body ?? {}), occurredAt },
+    label: options.label,
+    occurredAt,
+    createdAt: occurredAt,
+    attempts: 0,
+    state: 'pending'
+  };
+
+  options.apply?.();
+
+  if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+    outbox.add(entry, occurredAt);
+    notify();
+    return { queued: true };
+  }
+
+  const result = await trySend(entry);
+  if (result.outcome === 'sent') return { queued: false };
+
+  if (result.outcome === 'retry') {
+    outbox.add(entry, occurredAt);
+    notify();
+    return { queued: true };
+  }
+
+  throw new ApiError(result.error, 400);
+};
+
+// Оптимистичные правки кеша под каждое действие.
+export const optimistic = {
+  check: (id: string, occurredAt = new Date()) => () =>
+    patchEquipment(id, {
+      lastCheckOn: `${occurredAt.getFullYear()}-${String(occurredAt.getMonth() + 1).padStart(2, '0')}-${String(occurredAt.getDate()).padStart(2, '0')}`
+    }),
+  defect: (id: string, current: number) => () => patchEquipment(id, { openDefects: current + 1 }),
+  status: (id: string, status: Equipment['status']) => () => patchEquipment(id, { status }),
+  checkout: (kitId: string, equipmentId: string) => () => {
+    patchKitItem(kitId, equipmentId, { checkedOutAt: new Date().toISOString(), status: 'project' });
+    patchEquipment(equipmentId, { status: 'project' });
+  },
+  checkin: (kitId: string, equipmentId: string, state: 'ok' | 'damaged' | 'missing') => () => {
+    const status: Equipment['status'] = state === 'damaged' ? 'repair' : 'stock';
+    patchKitItem(kitId, equipmentId, {
+      checkedInAt: new Date().toISOString(),
+      returnState: state,
+      status: state === 'missing' ? 'transit' : status
+    });
+    if (state !== 'missing') patchEquipment(equipmentId, { status });
+  }
+};
+
+// --- синхронизация -----------------------------------------------------------
+
+const listeners = new Set<() => void>();
+
+const notify = (): void => {
+  for (const listener of listeners) listener();
+};
+
+export const subscribeQueue = (listener: () => void): (() => void) => {
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+};
+
+let syncing = false;
+
+export const syncNow = async (): Promise<{ sent: number; failed: number; stopped: boolean }> => {
+  if (syncing) return { sent: 0, failed: 0, stopped: false };
+  syncing = true;
+  try {
+    const report = await outbox.flush(trySend);
+    if (report.sent > 0 || report.failed > 0) notify();
+    return report;
+  } finally {
+    syncing = false;
+  }
+};
+
+export const retryFailed = async (): Promise<void> => {
+  outbox.retryFailed();
+  notify();
+  await syncNow();
+};
+
+export const dropFailed = (): void => {
+  outbox.clearFailed();
+  notify();
+};
+
+/** Досылка при появлении сети, возвращении к вкладке и раз в полминуты. */
+export const startAutoSync = (): (() => void) => {
+  const attempt = () => {
+    if (outbox.pending().length > 0 && navigator.onLine !== false) void syncNow();
+  };
+
+  const onVisible = () => {
+    if (document.visibilityState === 'visible') attempt();
+  };
+
+  window.addEventListener('online', attempt);
+  document.addEventListener('visibilitychange', onVisible);
+  const timer = window.setInterval(attempt, 30_000);
+  attempt();
+
+  return () => {
+    window.removeEventListener('online', attempt);
+    document.removeEventListener('visibilitychange', onVisible);
+    window.clearInterval(timer);
+  };
+};

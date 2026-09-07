@@ -7,7 +7,7 @@ import './index.css';
 // Одна сборка обслуживает два режима: штаб (демо на localStorage) и полевой
 // режим, который ходит в API. Разделяет их хеш — так работает и на статике,
 // и на своём сервере, без правил переписывания URL.
-const FIELD_ROUTE = /^#\/(eq|kit|stock|field)(\/|$)/;
+const FIELD_ROUTE = /^#\/(eq|kit|stock|queue|field)(\/|$)/;
 
 const isFieldMode = (): boolean => FIELD_ROUTE.test(window.location.hash);
 
@@ -28,3 +28,14 @@ window.addEventListener('hashchange', () => {
 });
 
 render();
+
+// Service worker нужен только собранному приложению: он и делает возможным
+// открыть склад без сети. В разработке он мешал бы горячей перезагрузке.
+if (import.meta.env.PROD && 'serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    void navigator.serviceWorker.register(`${import.meta.env.BASE_URL}sw.js`).catch(() => {
+      // Регистрация не удалась (например, http без TLS) — приложение
+      // продолжает работать, просто без офлайн-загрузки.
+    });
+  });
+}

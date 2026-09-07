@@ -19,12 +19,15 @@ export const uid = (): string => crypto.randomUUID();
 
 export const nowIso = (): string => new Date().toISOString();
 
-export const todayIso = (): string => {
-  const d = new Date();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${d.getFullYear()}-${m}-${day}`;
+// Календарная дата в часовом поясе сервера. Резать ISO-строку нельзя:
+// она в UTC, и вечерняя отметка попала бы на предыдущий день.
+export const isoDateOf = (date: Date): string => {
+  const m = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${date.getFullYear()}-${m}-${day}`;
 };
+
+export const todayIso = (): string => isoDateOf(new Date());
 
 export const defaultDbPath = (): string =>
   process.env.DB_PATH || path.join(SERVER_ROOT, 'data', '360profi.db');

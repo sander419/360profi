@@ -33,6 +33,8 @@ export interface Equipment {
 export interface HistoryEvent {
   id: string;
   kind: string;
+  /** Когда действие произошло на площадке (может быть раньше записи на сервере). */
+  occurredAt: string;
   fromStatus: string | null;
   toStatus: string | null;
   projectCode: string | null;
@@ -145,6 +147,8 @@ const request = async <T,>(
   return data as T;
 };
 
+// Доменные запросы живут в offline.ts: они обязаны проходить через кеш и очередь.
+// Здесь остаётся только то, что без связи невозможно в принципе.
 export const api = {
   login: async (phone: string, pin: string): Promise<SessionUser> => {
     const data = await request<{ token: string; user: SessionUser }>('/api/v1/auth/login', {
@@ -156,59 +160,5 @@ export const api = {
     return data.user;
   },
 
-  me: () => request<{ user: SessionUser }>('/api/v1/auth/me').then((d) => d.user),
-
-  equipmentByCode: (code: string) =>
-    request<{ item: Equipment }>(`/api/v1/equipment/by-code/${encodeURIComponent(code)}`).then(
-      (d) => d.item
-    ),
-
-  equipmentList: (params: Record<string, string> = {}) => {
-    const query = new URLSearchParams(params).toString();
-    return request<{ items: Equipment[] }>(`/api/v1/equipment${query ? `?${query}` : ''}`).then(
-      (d) => d.items
-    );
-  },
-
-  history: (id: string) =>
-    request<{ events: HistoryEvent[] }>(`/api/v1/equipment/${id}/history`).then((d) => d.events),
-
-  check: (id: string, note?: string) =>
-    request<{ item: Equipment }>(`/api/v1/equipment/${id}/check`, {
-      method: 'POST',
-      body: { note: note ?? '' }
-    }).then((d) => d.item),
-
-  reportDefect: (id: string, severity: 'low' | 'high' | 'blocker', description: string) =>
-    request<{ id: string }>(`/api/v1/equipment/${id}/defects`, {
-      method: 'POST',
-      body: { severity, description }
-    }),
-
-  setStatus: (id: string, status: string, projectId?: string | null, note?: string) =>
-    request<{ item: Equipment }>(`/api/v1/equipment/${id}/status`, {
-      method: 'POST',
-      body: { status, projectId, note: note ?? '' }
-    }).then((d) => d.item),
-
-  kits: () => request<{ kits: Kit[] }>('/api/v1/kits').then((d) => d.kits),
-
-  kit: (id: string) => request<{ kit: Kit }>(`/api/v1/kits/${id}`).then((d) => d.kit),
-
-  checkout: (kitId: string, equipmentId: string, note?: string) =>
-    request<{ kit: Kit }>(`/api/v1/kits/${kitId}/checkout`, {
-      method: 'POST',
-      body: { equipmentId, note: note ?? '' }
-    }).then((d) => d.kit),
-
-  checkin: (
-    kitId: string,
-    equipmentId: string,
-    returnState: 'ok' | 'damaged' | 'missing',
-    note?: string
-  ) =>
-    request<{ kit: Kit }>(`/api/v1/kits/${kitId}/checkin`, {
-      method: 'POST',
-      body: { equipmentId, returnState, note: note ?? '' }
-    }).then((d) => d.kit)
+  me: () => request<{ user: SessionUser }>('/api/v1/auth/me').then((d) => d.user)
 };

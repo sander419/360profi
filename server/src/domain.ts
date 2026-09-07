@@ -2,7 +2,7 @@
 // Всё, что меняет статус единицы, проходит здесь — чтобы журнал нельзя было обойти.
 
 import type { DatabaseSync } from 'node:sqlite';
-import { uid, nowIso, todayIso } from './db.ts';
+import { uid, nowIso, todayIso, isoDateOf } from './db.ts';
 
 export type EquipmentStatus = 'stock' | 'project' | 'repair' | 'reserved' | 'transit';
 
@@ -39,6 +39,18 @@ export interface EquipmentRow {
   updated_at: string;
 }
 
+// Время действия приходит с телефона, который мог пролежать без связи и с
+// неверными часами. Принимаем только правдоподобное, иначе журнал станет ложью.
+export const sanitizeOccurredAt = (value: unknown): string | null => {
+  if (typeof value !== 'string' || value.length === 0) return null;
+  const ts = Date.parse(value);
+  if (Number.isNaN(ts)) return null;
+  const now = Date.now();
+  if (ts > now + 5 * 60 * 1000) return null;
+  if (ts < now - 60 * 86400000) return null;
+  return new Date(ts).toISOString();
+};
+
 export class DomainError extends Error {
   statusCode: number;
   constructor(message: string, statusCode = 400) {
@@ -63,12 +75,14 @@ export const logEvent = (
     projectId?: string | null;
     userId?: string | null;
     note?: string;
+    occurredAt?: string | null;
   }
 ): void => {
+  const at = nowIso();
   db.prepare(
     `INSERT INTO equipment_events
-       (id, equipment_id, kind, from_status, to_status, project_id, user_id, note, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+       (id, equipment_id, kind, from_status, to_status, project_id, user_id, note, created_at, occurred_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     uid(),
     event.equipmentId,
@@ -78,7 +92,8 @@ export const logEvent = (
     event.projectId ?? null,
     event.userId ?? null,
     event.note ?? '',
-    nowIso()
+    at,
+    event.occurredAt ?? at
   );
 };
 
@@ -92,6 +107,7 @@ export const changeStatus = (
     userId: string | null;
     note?: string;
     kind?: EventKind;
+    occurredAt?: string | null;
   }
 ): EquipmentRow => {
   const current = getEquipment(db, params.equipmentId);
@@ -128,7 +144,8 @@ export const changeStatus = (
     toStatus: params.status,
     projectId: nextProject,
     userId: params.userId,
-    note: params.note ?? ''
+    note: params.note ?? '',
+    occurredAt: params.occurredAt ?? null
   });
 
   return getEquipment(db, params.equipmentId);
@@ -136,11 +153,18 @@ export const changeStatus = (
 
 export const markChecked = (
   db: DatabaseSync,
-  params: { equipmentId: string; userId: string | null; note?: string }
+  params: {
+    equipmentId: string;
+    userId: string | null;
+    note?: string;
+    occurredAt?: string | null;
+  }
 ): EquipmentRow => {
   const current = getEquipment(db, params.equipmentId);
+  // Проверка, сделанная вчера без связи, должна остаться вчерашней.
+  const checkedOn = params.occurredAt ? isoDateOf(new Date(params.occurredAt)) : todayIso();
   db.prepare('UPDATE equipment SET last_check_on = ?, updated_at = ? WHERE id = ?').run(
-    todayIso(),
+    checkedOn,
     nowIso(),
     params.equipmentId
   );
@@ -151,7 +175,8 @@ export const markChecked = (
     toStatus: current.status,
     projectId: current.project_id,
     userId: params.userId,
-    note: params.note ?? ''
+    note: params.note ?? '',
+    occurredAt: params.occurredAt ?? null
   });
   return getEquipment(db, params.equipmentId);
 };
@@ -163,6 +188,7 @@ export const openDefect = (
     severity: 'low' | 'high' | 'blocker';
     description: string;
     userId: string | null;
+    occurredAt?: string | null;
   }
 ): { id: string } => {
   getEquipment(db, params.equipmentId);
@@ -176,7 +202,8 @@ export const openDefect = (
     equipmentId: params.equipmentId,
     kind: 'defect',
     userId: params.userId,
-    note: `${params.severity}: ${params.description}`
+    note: `${params.severity}: ${params.description}`,
+    occurredAt: params.occurredAt ?? null
   });
 
   return { id };
