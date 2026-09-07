@@ -1,0 +1,20 @@
+{
+  "name": "360profi-server",
+  "private": true,
+  "version": "0.1.0",
+  "description": "360PROFI - API склада и оборудования",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "dev": "node --watch src/server.ts",
+    "start": "node src/server.ts",
+    "seed": "node src/seed.ts",
+    "test": "node --test \"test/*.test.ts\""
+  },
+  "dependencies": {
+    "@fastify/cors": "^10.0.2",
+    "fastify": "^5.2.1"
+  }
+}

@@ -11,7 +11,10 @@
     "deploy": "npm run build:pages && node scripts/deploy.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
-    "clean": "rm -rf dist server.js"
+    "clean": "rm -rf dist server.js",
+    "api": "npm --prefix server run dev",
+    "api:seed": "npm --prefix server run seed",
+    "api:test": "npm --prefix server test"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

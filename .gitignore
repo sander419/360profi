@@ -6,3 +6,6 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# бэкенд: файл базы и секрет подписи токенов
+server/data/
