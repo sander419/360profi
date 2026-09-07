@@ -975,6 +975,14 @@ export const FieldApp: React.FC = () => {
 
   useEffect(() => (user ? startAutoSync() : undefined), [user]);
 
+  // Пока связь есть, тихо складываем в телефон весь склад и выезды. Иначе офлайн
+  // работал бы только для того, что техник успел открыть руками, — а он не успеет.
+  useEffect(() => {
+    if (!user) return;
+    void loadEquipmentList().catch(() => undefined);
+    void loadKits().catch(() => undefined);
+  }, [user]);
+
   const logout = () => {
     clearSession();
     setUser(null);
