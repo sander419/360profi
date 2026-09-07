@@ -1,0 +1,6 @@
+{
+  "name": "360PROFI · Внутренний штаб",
+  "description": "Единый внутренний операционный штаб управления проектами, оборудованием, командой и задачами для 360PROFI",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

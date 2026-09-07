@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+:root {
+  --bg: #09090b;
+  --surface: #18181b;
+  --surface-hover: #222226;
+  --border: #27272a;
+  --border2: #3f3f46;
+  --text: #fafafa;
+  --muted: #a1a1aa;
+  --muted2: #71717a;
+  --acc: #6366f1;
+  --acc-dim: rgba(99, 102, 241, 0.12);
+  --acc-hover: #4f46e5;
+  --ok: #10b981;
+  --ok-dim: rgba(16, 185, 129, 0.15);
+  --warn: #f59e0b;
+  --warn-dim: rgba(245, 158, 11, 0.15);
+  --bad: #f43f5e;
+  --bad-dim: rgba(244, 63, 94, 0.15);
+  --vio: #8b5cf6;
+  --vio-dim: rgba(139, 92, 246, 0.15);
+  --r: 16px;
+  --rs: 8px;
+  --shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -2px rgba(0, 0, 0, 0.1);
+  --font: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --mono: 'JetBrains Mono', monospace;
+}
+
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+  height: 100vh;
+}
+
+body::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background:
+    radial-gradient(circle at top right, rgba(99, 102, 241, 0.08), transparent 50%),
+    radial-gradient(circle at bottom left, rgba(16, 185, 129, 0.04), transparent 50%);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.mono {
+  font-family: var(--mono);
+}
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #27272a;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #3f3f46;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+@keyframes flashRow {
+  0%, 60% {
+    background-color: rgba(99, 102, 241, 0.2);
+  }
+  100% {
+    background-color: transparent;
+  }
+}
+
+.animate-flash {
+  animation: flashRow 1.6s ease;
+}
+
