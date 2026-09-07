@@ -1,10 +1,30 @@
-import {StrictMode} from 'react';
-import {createRoot} from 'react-dom/client';
+import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
 import App from './App.tsx';
+import { FieldApp } from './field/FieldApp.tsx';
 import './index.css';
 
-createRoot(document.getElementById('root')!).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+// Одна сборка обслуживает два режима: штаб (демо на localStorage) и полевой
+// режим, который ходит в API. Разделяет их хеш — так работает и на статике,
+// и на своём сервере, без правил переписывания URL.
+const FIELD_ROUTE = /^#\/(eq|kit|stock|field)(\/|$)/;
+
+const isFieldMode = (): boolean => FIELD_ROUTE.test(window.location.hash);
+
+const root = createRoot(document.getElementById('root')!);
+
+const render = () => {
+  root.render(<StrictMode>{isFieldMode() ? <FieldApp /> : <App />}</StrictMode>);
+};
+
+// Переход между режимами перерисовывает всё дерево: у них разное состояние
+// и общего контекста нет.
+let fieldMode = isFieldMode();
+window.addEventListener('hashchange', () => {
+  if (isFieldMode() !== fieldMode) {
+    fieldMode = isFieldMode();
+    render();
+  }
+});
+
+render();

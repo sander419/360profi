@@ -61,7 +61,7 @@ export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
         `SELECT * FROM equipment ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
          ORDER BY category, name`
       )
-      .all(...params) as EquipmentRow[];
+      .all(...params) as unknown as EquipmentRow[];
 
     const defects = openDefectCounts(db, rows.map((r) => r.id));
     return { items: rows.map((r) => serializeEquipment(r, defects.get(r.id) ?? 0)) };
@@ -106,7 +106,7 @@ export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
           ORDER BY e.created_at DESC, e.rowid DESC
           LIMIT 200`
       )
-      .all(id) as Record<string, unknown>[];
+      .all(id) as unknown as Record<string, unknown>[];
 
     return {
       events: events.map((e) => ({

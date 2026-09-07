@@ -26,7 +26,7 @@ interface KitItemRow {
 }
 
 const getKit = (db: FastifyInstance['ctx']['db'], id: string): KitRow => {
-  const kit = db.prepare('SELECT * FROM kits WHERE id = ?').get(id) as KitRow | undefined;
+  const kit = db.prepare('SELECT * FROM kits WHERE id = ?').get(id) as unknown as KitRow | undefined;
   if (!kit) throw new DomainError('Комплект не найден', 404);
   return kit;
 };
@@ -41,7 +41,7 @@ const kitPayload = (db: FastifyInstance['ctx']['db'], kit: KitRow) => {
         WHERE ki.kit_id = ?
         ORDER BY e.category, e.name`
     )
-    .all(kit.id) as KitItemRow[];
+    .all(kit.id) as unknown as KitItemRow[];
 
   const project = db.prepare('SELECT code, title FROM projects WHERE id = ?').get(kit.project_id) as
     | { code: string; title: string }
@@ -89,7 +89,7 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
       .prepare(
         `SELECT * FROM kits ${projectId ? 'WHERE project_id = ?' : ''} ORDER BY created_at DESC`
       )
-      .all(...(projectId ? [projectId] : [])) as KitRow[];
+      .all(...(projectId ? [projectId] : [])) as unknown as KitRow[];
     return { kits: kits.map((k) => kitPayload(db, k)) };
   });
 

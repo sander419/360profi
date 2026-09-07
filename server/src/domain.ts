@@ -48,7 +48,7 @@ export class DomainError extends Error {
 }
 
 export const getEquipment = (db: DatabaseSync, id: string): EquipmentRow => {
-  const row = db.prepare('SELECT * FROM equipment WHERE id = ?').get(id) as EquipmentRow | undefined;
+  const row = db.prepare('SELECT * FROM equipment WHERE id = ?').get(id) as unknown as EquipmentRow | undefined;
   if (!row) throw new DomainError('Единица оборудования не найдена', 404);
   return row;
 };

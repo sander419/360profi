@@ -18,7 +18,7 @@ export const catalogRoutes = async (app: FastifyInstance): Promise<void> => {
       .prepare(
         `SELECT * FROM projects ${status ? 'WHERE status = ?' : ''} ORDER BY starts_on IS NULL, starts_on`
       )
-      .all(...(status ? [status] : [])) as Record<string, unknown>[];
+      .all(...(status ? [status] : [])) as unknown as Record<string, unknown>[];
     return {
       projects: rows.map((p) => ({
         id: p.id,
@@ -128,7 +128,7 @@ export const catalogRoutes = async (app: FastifyInstance): Promise<void> => {
           ${status ? 'WHERE d.status = ?' : "WHERE d.status != 'closed'"}
           ORDER BY d.created_at DESC`
       )
-      .all(...(status ? [status] : [])) as Record<string, unknown>[];
+      .all(...(status ? [status] : [])) as unknown as Record<string, unknown>[];
 
     return {
       defects: rows.map((d) => ({

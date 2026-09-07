@@ -2,7 +2,7 @@
 // поднимали то же самое приложение через app.inject(), без свободного порта.
 
 import Fastify from 'fastify';
-import type { FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
+import type { FastifyError, FastifyInstance, FastifyReply, FastifyRequest } from 'fastify';
 import cors from '@fastify/cors';
 import type { DatabaseSync } from 'node:sqlite';
 import { openDb, defaultDbPath } from './db.ts';
@@ -69,7 +69,7 @@ export const buildApp = async (options: BuildOptions = {}): Promise<FastifyInsta
     }
   });
 
-  app.setErrorHandler((err, req, reply) => {
+  app.setErrorHandler((err: FastifyError, req, reply) => {
     if (err instanceof DomainError) {
       return reply.code(err.statusCode).send({ error: err.message });
     }

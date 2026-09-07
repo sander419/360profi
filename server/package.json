@@ -11,10 +11,19 @@
     "dev": "node --watch src/server.ts",
     "start": "node src/server.ts",
     "seed": "node src/seed.ts",
-    "test": "node --test \"test/*.test.ts\""
+    "test": "node --test \"test/*.test.ts\"",
+    "typecheck": "tsc --noEmit",
+    "import-users": "node src/import-users.ts",
+    "labels": "node src/labels.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.2",
-    "fastify": "^5.2.1"
+    "@types/qrcode": "^1.5.6",
+    "fastify": "^5.2.1",
+    "qrcode": "^1.5.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.14.0",
+    "typescript": "~5.8.2"
   }
 }

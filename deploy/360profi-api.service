@@ -1,0 +1,40 @@
+[Unit]
+Description=360PROFI API (склад и оборудование)
+Documentation=https://github.com/sander419/360profi
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=profi360
+Group=profi360
+WorkingDirectory=/opt/360profi/server
+ExecStart=/usr/bin/node src/server.ts
+Restart=always
+RestartSec=3
+
+Environment=NODE_ENV=production
+Environment=PORT=4000
+Environment=HOST=127.0.0.1
+Environment=DB_PATH=/var/lib/360profi/360profi.db
+# JWT_SECRET и CORS_ORIGIN лежат в /etc/360profi.env — файл не в репозитории.
+EnvironmentFile=-/etc/360profi.env
+
+# Сервис ходит только в свой каталог данных: остальная файловая система read-only.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/360profi
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+MemoryMax=512M
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=360profi-api
+
+[Install]
+WantedBy=multi-user.target
