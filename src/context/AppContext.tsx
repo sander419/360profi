@@ -22,6 +22,7 @@ import {
   getSeedState,
   IMG,
   D,
+  toIsoDate,
   daysLeft,
   fmtRu,
   getSeedActivities,
@@ -36,11 +37,7 @@ const STORAGE_KEY = 'profi360_hub_v1';
 const SOUND_STORAGE_KEY = 'profi360_sound_v1';
 const SEED_DATE_KEY = 'profi360_seed_date_v1';
 
-const todayIso = (): string => {
-  const d = new Date();
-  d.setHours(0, 0, 0, 0);
-  return d.toISOString().slice(0, 10);
-};
+const todayIso = (): string => toIsoDate(new Date());
 
 const stampSeedDate = () => {
   try {
@@ -57,7 +54,7 @@ const shiftDates = <T,>(value: T, days: number): T => {
     if (!ISO_DATE.test(value)) return value;
     const d = new Date(value + 'T00:00:00');
     d.setDate(d.getDate() + days);
-    return d.toISOString().slice(0, 10) as unknown as T;
+    return toIsoDate(d) as unknown as T;
   }
   if (Array.isArray(value)) {
     return value.map((v) => shiftDates(v, days)) as unknown as T;

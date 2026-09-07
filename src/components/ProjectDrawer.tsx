@@ -19,7 +19,7 @@ import { useApp } from '../context/AppContext';
 import { Avatar } from './common/Avatar';
 import { CircularProgress } from './common/CircularProgress';
 import { BreakdownBars } from './common/BreakdownBars';
-import { fmtRu, daysLeft, pctColor } from '../data/seedData';
+import { fmtRu, daysLeft, pctColor, toIsoDate } from '../data/seedData';
 import {
   getProjectBudgetStats,
   formatRuCurrency,
@@ -228,7 +228,7 @@ export const ProjectDrawer: React.FC = () => {
                 title: expenseTitle.trim(),
                 amount: num,
                 category: expenseCategory,
-                date: new Date().toISOString().slice(0, 10)
+                date: toIsoDate(new Date())
               });
               setExpenseTitle('');
               setExpenseAmount('');
@@ -240,7 +240,7 @@ export const ProjectDrawer: React.FC = () => {
                 title,
                 amount,
                 category,
-                date: new Date().toISOString().slice(0, 10)
+                date: toIsoDate(new Date())
               });
             };
 

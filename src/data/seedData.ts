@@ -1,9 +1,17 @@
 import { AppState, ActivityItem, TaskAutomationRule, AutomationLogEntry } from '../types';
 
+// Календарная дата в местном часовом поясе. toISOString() здесь не годится:
+// он переводит время в UTC и в поясах восточнее Гринвича возвращает вчера.
+export const toIsoDate = (dt: Date): string => {
+  const m = String(dt.getMonth() + 1).padStart(2, '0');
+  const d = String(dt.getDate()).padStart(2, '0');
+  return `${dt.getFullYear()}-${m}-${d}`;
+};
+
 export const D = (off: number): string => {
   const dt = new Date();
   dt.setDate(dt.getDate() + off);
-  return dt.toISOString().slice(0, 10);
+  return toIsoDate(dt);
 };
 
 export const MONTHS = [

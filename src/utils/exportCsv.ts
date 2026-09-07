@@ -1,5 +1,5 @@
 import { Project, Task, TeamMember, EquipmentItem } from '../types';
-import { fmtRu, daysLeft } from '../data/seedData';
+import { fmtRu, daysLeft, toIsoDate } from '../data/seedData';
 
 /**
  * Escapes a field for CSV format and wraps with quotes if needed
@@ -106,7 +106,7 @@ export function exportProjectsToCsv(
     ]);
   });
 
-  const nowStr = new Date().toISOString().slice(0, 10);
+  const nowStr = toIsoDate(new Date());
   downloadCsv(`projects_report_${nowStr}.csv`, rows);
 }
 
@@ -163,7 +163,7 @@ export function exportTasksToCsv(
     ]);
   });
 
-  const nowStr = new Date().toISOString().slice(0, 10);
+  const nowStr = toIsoDate(new Date());
   downloadCsv(`tasks_report_${nowStr}.csv`, rows);
 }
 
@@ -214,7 +214,7 @@ export function exportEquipmentToCsv(
     ]);
   });
 
-  const nowStr = new Date().toISOString().slice(0, 10);
+  const nowStr = toIsoDate(new Date());
   downloadCsv(`equipment_inventory_${nowStr}.csv`, rows);
 }
 
@@ -260,7 +260,7 @@ export function exportTeamToCsv(team: TeamMember[]): void {
     ]);
   });
 
-  const nowStr = new Date().toISOString().slice(0, 10);
+  const nowStr = toIsoDate(new Date());
   downloadCsv(`team_roster_${nowStr}.csv`, rows);
 }
 
