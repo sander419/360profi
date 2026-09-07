@@ -8,7 +8,7 @@
     "build": "vite build",
     "build:pages": "vite build --base=/360profi/",
     "preview": "vite preview",
-    "deploy": "npm run build:pages && gh-pages -d dist -b gh-pages --dotfiles",
+    "deploy": "npm run build:pages && node scripts/deploy.mjs",
     "typecheck": "tsc --noEmit",
     "lint": "tsc --noEmit",
     "clean": "rm -rf dist server.js"
@@ -31,7 +31,6 @@
     "@types/node": "^22.14.0",
     "autoprefixer": "^10.4.21",
     "esbuild": "^0.25.0",
-    "gh-pages": "^6.3.0",
     "tailwindcss": "^4.1.14",
     "tsx": "^4.21.0",
     "typescript": "~5.8.2",
