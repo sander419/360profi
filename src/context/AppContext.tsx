@@ -20,6 +20,7 @@ import {
 } from '../types';
 import {
   getSeedState,
+  IMG,
   D,
   daysLeft,
   fmtRu,
@@ -33,6 +34,66 @@ import { playSuccessChime, playRadioChirp, playAlertTone } from '../utils/soundE
 
 const STORAGE_KEY = 'profi360_hub_v1';
 const SOUND_STORAGE_KEY = 'profi360_sound_v1';
+const SEED_DATE_KEY = 'profi360_seed_date_v1';
+
+const todayIso = (): string => {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  return d.toISOString().slice(0, 10);
+};
+
+const stampSeedDate = () => {
+  try {
+    localStorage.setItem(SEED_DATE_KEY, todayIso());
+  } catch {
+    // storage unavailable
+  }
+};
+
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+
+const shiftDates = <T,>(value: T, days: number): T => {
+  if (typeof value === 'string') {
+    if (!ISO_DATE.test(value)) return value;
+    const d = new Date(value + 'T00:00:00');
+    d.setDate(d.getDate() + days);
+    return d.toISOString().slice(0, 10) as unknown as T;
+  }
+  if (Array.isArray(value)) {
+    return value.map((v) => shiftDates(v, days)) as unknown as T;
+  }
+  if (value && typeof value === 'object') {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
+      out[k] =
+        k === 'timestamp' && typeof v === 'number' ? v + days * 86400000 : shiftDates(v, days);
+    }
+    return out as unknown as T;
+  }
+  return value;
+};
+
+// Демо-данные сеются относительно дня первого запуска. Без этого сдвига
+// через неделю после открытия все сроки выглядят просроченными.
+const refreshDemoDates = (state: AppState): AppState => {
+  try {
+    const stamped = localStorage.getItem(SEED_DATE_KEY);
+    const today = todayIso();
+    if (!stamped || !ISO_DATE.test(stamped)) {
+      localStorage.setItem(SEED_DATE_KEY, today);
+      return state;
+    }
+    const days = Math.round(
+      (new Date(today + 'T00:00:00').getTime() - new Date(stamped + 'T00:00:00').getTime()) /
+        86400000
+    );
+    if (days <= 0) return state;
+    localStorage.setItem(SEED_DATE_KEY, today);
+    return shiftDates(state, days);
+  } catch {
+    return state;
+  }
+};
 
 interface AppContextType {
   state: AppState;
@@ -177,11 +238,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         if (!parsed.automationLogs || !Array.isArray(parsed.automationLogs)) {
           parsed.automationLogs = seed.automationLogs || DEFAULT_AUTOMATION_LOGS;
         }
-        return parsed;
+        return refreshDemoDates(parsed as AppState);
       }
     } catch {
       // ignore
     }
+    stampSeedDate();
     return getSeedState();
   });
 
@@ -1128,7 +1190,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       expenses: [],
       alertedBudgetThresholds: [],
       manager: projectData.manager || state.team[0]?.name || 'Диспетчер',
-      img: 'https://images.unsplash.com/photo-1511578314322-379afb476865?auto=format&fit=crop&w=800&q=80',
+      img: IMG.placeholder,
       status: 'active',
       breakdown: {
         team: 25,
@@ -1770,6 +1832,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const resetDemo = () => {
     const seed = getSeedState();
+    stampSeedDate();
     setState(seed);
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(seed));

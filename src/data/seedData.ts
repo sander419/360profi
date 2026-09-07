@@ -54,13 +54,16 @@ export const loadColor = (l: number): string => {
   return l > 85 ? 'var(--bad)' : l >= 50 ? 'var(--acc)' : 'var(--ok)';
 };
 
+const asset = (file: string): string => `${import.meta.env.BASE_URL}img/${file}`;
+
 export const IMG = {
-  conf: 'https://image.qwenlm.ai/public_source/fa263eec-a2b5-441d-9e15-5addfff29266/18c19bc05-5759-49fe-8f2b-bb1d7266aa07.png',
-  light: 'https://image.qwenlm.ai/public_source/fa263eec-a2b5-441d-9e15-5addfff29266/11b4b2a8a-644b-47f7-8085-f361f1f6ff3e.png',
-  broadcast: 'https://image.qwenlm.ai/public_source/fa263eec-a2b5-441d-9e15-5addfff29266/1008ccbf2-9337-4792-93a8-fd6e162f7f0d.png',
-  fest: 'https://image.qwenlm.ai/public_source/fa263eec-a2b5-441d-9e15-5addfff29266/18e8e5f45-14e0-4b17-95a5-bbda15036d38.png',
-  wh: 'https://image.qwenlm.ai/public_source/fa263eec-a2b5-441d-9e15-5addfff29266/1ef7879f0-5d23-4162-aaae-4c16e45faf7b.png',
-  logo: 'https://image.qwenlm.ai/public_source/fa263eec-a2b5-441d-9e15-5addfff29266/1f40ed666-1b11-4e4c-9c64-e86bb2aa444c.png'
+  conf: asset('conf.jpg'),
+  light: asset('light.jpg'),
+  broadcast: asset('broadcast.jpg'),
+  fest: asset('fest.jpg'),
+  wh: asset('wh.jpg'),
+  logo: asset('logo.jpg'),
+  placeholder: asset('new.jpg')
 };
 
 export const DEFAULT_AUTOMATION_RULES: TaskAutomationRule[] = [
