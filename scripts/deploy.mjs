@@ -34,9 +34,28 @@ const indexFile = path.join(gitDir, 'gh-pages-index');
 fs.rmSync(indexFile, { force: true });
 const env = { ...process.env, GIT_INDEX_FILE: indexFile };
 
-// core.autocrlf=input: в рабочей копии на Windows файлы лежат с CRLF, и без
-// этого в ветку уезжали бы то LF, то CRLF — каждый деплой давал бы полный дифф.
-git(['-c', 'core.autocrlf=input', '--work-tree', DIST, 'add', '--all', '--force', '.'], { env });
+// Vite копирует index.html байт в байт, поэтому на Windows он уезжает в ветку
+// с CRLF, а с другой машины — с LF, и деплой каждый раз переписывает файл целиком.
+// git на таком добавлении конверсию не применяет, приводим к LF сами.
+const TEXT_FILE = /\.(html|css|js|mjs|json|svg|txt|map|webmanifest)$/i;
+
+const toLf = (dir) => {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const full = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      toLf(full);
+    } else if (TEXT_FILE.test(entry.name)) {
+      const buf = fs.readFileSync(full);
+      if (buf.includes(0x0d)) {
+        fs.writeFileSync(full, buf.toString('utf8').split('\r\n').join('\n'));
+      }
+    }
+  }
+};
+
+toLf(path.join(root, DIST));
+
+git(['--work-tree', DIST, 'add', '--all', '--force', '.'], { env });
 const tree = git(['write-tree'], { env });
 fs.rmSync(indexFile, { force: true });
 
