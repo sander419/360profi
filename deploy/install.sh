@@ -28,8 +28,18 @@ if [[ -z "$DOMAIN" ]]; then
 fi
 
 echo "==> Пакеты"
-apt-get update -qq
-apt-get install -y -qq curl git nginx ca-certificates >/dev/null
+MISSING=()
+for pkg in curl git nginx ca-certificates; do
+  dpkg -s "$pkg" >/dev/null 2>&1 || MISSING+=("$pkg")
+done
+if [[ ${#MISSING[@]} -eq 0 ]]; then
+  echo "    всё нужное уже стоит"
+else
+  # apt-get update на живой машине может падать из-за чужого сломанного
+  # репозитория. Это не повод отменять установку, пока нужные пакеты ставятся.
+  apt-get update -qq || echo "    предупреждение: apt-get update с ошибкой, продолжаем"
+  apt-get install -y -qq "${MISSING[@]}" >/dev/null
+fi
 
 if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | cut -c2- | cut -d. -f1)" -lt 22 ]]; then
   echo "==> Node 22"
