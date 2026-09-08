@@ -255,8 +255,109 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
     }
   );
 
-  // Возврат со съёмки. Повреждённое сразу уходит в ремонт с заведённым дефектом,
+  // Приём одной позиции. Повреждённое сразу уходит в ремонт с заведённым дефектом,
   // иначе «потом посмотрим» превращается в поломку на следующем выезде.
+  const receive = (params: {
+    kit: KitRow;
+    equipmentId: string;
+    returnState: 'ok' | 'damaged' | 'missing';
+    note?: string;
+    userId: string;
+    occurredAt: string | null;
+  }): void => {
+    const { kit, equipmentId, returnState, userId, occurredAt } = params;
+    const note = params.note ?? '';
+
+    db.prepare(
+      `UPDATE kit_items SET checked_in_at = ?, checked_in_by = ?, return_state = ?, note = ?
+        WHERE kit_id = ? AND equipment_id = ?`
+    ).run(occurredAt ?? nowIso(), userId, returnState, note, kit.id, equipmentId);
+
+    if (returnState === 'missing') {
+      logEvent(db, {
+        equipmentId,
+        kind: 'kit_in',
+        projectId: kit.project_id,
+        userId,
+        note: `Не вернулось с проекта: ${note}`.trim(),
+        occurredAt
+      });
+      openDefect(db, {
+        equipmentId,
+        severity: 'blocker',
+        description: `Не вернулось с выезда «${kit.name}». ${note}`.trim(),
+        userId,
+        occurredAt
+      });
+      return;
+    }
+
+    changeStatus(db, {
+      equipmentId,
+      status: returnState === 'damaged' ? 'repair' : 'stock',
+      projectId: null,
+      userId,
+      note: `Возврат: ${kit.name}. ${note}`.trim(),
+      kind: 'kit_in',
+      occurredAt
+    });
+
+    if (returnState === 'damaged') {
+      openDefect(db, {
+        equipmentId,
+        severity: 'high',
+        description: `Повреждение при возврате с выезда «${kit.name}». ${note}`.trim(),
+        userId,
+        occurredAt
+      });
+    }
+  };
+
+  // Возврат со съёмки.
+  // Приём всего остатка целыми. Ночью на разгрузке отмечать двадцать позиций
+  // по одной никто не станет: сначала отмечают исключения, потом жмут одну кнопку.
+  app.post(
+    '/:id/checkin-rest',
+    {
+      preHandler: anyUser,
+      schema: {
+        body: {
+          type: 'object',
+          properties: {
+            note: { type: 'string', maxLength: 500 },
+            occurredAt: { type: 'string', maxLength: 40 }
+          }
+        }
+      }
+    },
+    async (req) => {
+      const { id } = req.params as { id: string };
+      const body = (req.body ?? {}) as { note?: string; occurredAt?: string };
+      const occurredAt = sanitizeOccurredAt(body.occurredAt);
+      const kit = getKit(db, id);
+
+      const pending = db
+        .prepare(
+          `SELECT equipment_id FROM kit_items
+            WHERE kit_id = ? AND checked_out_at IS NOT NULL AND checked_in_at IS NULL`
+        )
+        .all(id) as unknown as { equipment_id: string }[];
+
+      for (const item of pending) {
+        receive({
+          kit,
+          equipmentId: item.equipment_id,
+          returnState: 'ok',
+          note: body.note,
+          userId: req.user!.id,
+          occurredAt
+        });
+      }
+
+      return { kit: kitPayload(db, getKit(db, id)), accepted: pending.length };
+    }
+  );
+
   app.post(
     '/:id/checkin',
     {
@@ -296,48 +397,14 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
       if (!item.checked_out_at) throw new DomainError('Позиция не отмечалась при погрузке');
       if (item.checked_in_at) throw new DomainError('Позиция уже принята', 409);
 
-      db.prepare(
-        `UPDATE kit_items SET checked_in_at = ?, checked_in_by = ?, return_state = ?, note = ?
-          WHERE kit_id = ? AND equipment_id = ?`
-      ).run(occurredAt ?? nowIso(), req.user!.id, body.returnState, body.note ?? '', id, body.equipmentId);
-
-      if (body.returnState === 'missing') {
-        logEvent(db, {
-          equipmentId: body.equipmentId,
-          kind: 'kit_in',
-          projectId: kit.project_id,
-          userId: req.user!.id,
-          note: `Не вернулось с проекта: ${body.note ?? ''}`.trim(),
-          occurredAt
-        });
-        openDefect(db, {
-          equipmentId: body.equipmentId,
-          severity: 'blocker',
-          description: `Не вернулось с выезда «${kit.name}». ${body.note ?? ''}`.trim(),
-          userId: req.user!.id,
-          occurredAt
-        });
-      } else {
-        changeStatus(db, {
-          equipmentId: body.equipmentId,
-          status: body.returnState === 'damaged' ? 'repair' : 'stock',
-          projectId: null,
-          userId: req.user!.id,
-          note: `Возврат: ${kit.name}. ${body.note ?? ''}`.trim(),
-          kind: 'kit_in',
-          occurredAt
-        });
-
-        if (body.returnState === 'damaged') {
-          openDefect(db, {
-            equipmentId: body.equipmentId,
-            severity: 'high',
-            description: `Повреждение при возврате с выезда «${kit.name}». ${body.note ?? ''}`.trim(),
-            userId: req.user!.id,
-            occurredAt
-          });
-        }
-      }
+      receive({
+        kit,
+        equipmentId: body.equipmentId,
+        returnState: body.returnState,
+        note: body.note,
+        userId: req.user!.id,
+        occurredAt
+      });
 
       return { kit: kitPayload(db, kit) };
     }

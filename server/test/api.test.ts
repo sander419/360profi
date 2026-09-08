@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { buildApp } from '../src/app.ts';
 import { openDb, uid, nowIso } from '../src/db.ts';
 import { hashPin } from '../src/auth.ts';
+import { resetNotifier, setNotifier } from '../src/notify.ts';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -287,6 +288,66 @@ describe('комплект на выезд', () => {
     assert.equal(item.json().item.openDefects, 2);
   });
 
+  // Ночью на разгрузке двадцать позиций по одной не отметит никто.
+  test('остаток принимается одной кнопкой, исключения отмечаются заранее', async () => {
+    const project = (
+      await call('POST', '/api/v1/projects', { token: tokens.tech, body: { title: 'Разгрузка' } })
+    ).json().project;
+
+    const codes = ['BULK-1', 'BULK-2', 'BULK-3'];
+    const created = [];
+    for (const code of codes) {
+      const res = await call('POST', '/api/v1/equipment', {
+        token: tokens.tech,
+        body: { code, name: `Позиция ${code}`, category: 'Разное' }
+      });
+      created.push(res.json().item.id);
+    }
+
+    const kit = (
+      await call('POST', '/api/v1/kits', {
+        token: tokens.tech,
+        body: { projectId: project.id, name: 'Ночная разгрузка', equipmentIds: created }
+      })
+    ).json().kit;
+
+    for (const equipmentId of created) {
+      await call('POST', `/api/v1/kits/${kit.id}/checkout`, {
+        token: tokens.tech,
+        body: { equipmentId }
+      });
+    }
+
+    // Исключение отмечаем поштучно...
+    await call('POST', `/api/v1/kits/${kit.id}/checkin`, {
+      token: tokens.tech,
+      body: { equipmentId: created[0], returnState: 'damaged', note: 'помяли корпус' }
+    });
+
+    // ...остальное — одной кнопкой.
+    const rest = await call('POST', `/api/v1/kits/${kit.id}/checkin-rest`, {
+      token: tokens.tech,
+      body: {}
+    });
+    assert.equal(rest.statusCode, 200);
+    assert.equal(rest.json().accepted, 2, 'принято ровно то, что оставалось');
+    assert.equal(rest.json().kit.progress.returned, 3, 'выезд закрыт полностью');
+
+    const damaged = await call('GET', `/api/v1/equipment/${created[0]}`, { token: tokens.tech });
+    assert.equal(damaged.json().item.status, 'repair', 'повреждённое не уехало на склад');
+
+    const fine = await call('GET', `/api/v1/equipment/${created[1]}`, { token: tokens.tech });
+    assert.equal(fine.json().item.status, 'stock');
+    assert.equal(fine.json().item.projectId, null);
+
+    // Повторное нажатие ничего не портит: принимать больше нечего.
+    const again = await call('POST', `/api/v1/kits/${kit.id}/checkin-rest`, {
+      token: tokens.tech,
+      body: {}
+    });
+    assert.equal(again.json().accepted, 0);
+  });
+
   test('приём позиции, которую не грузили, отклоняется', async () => {
     const res = await call('POST', `/api/v1/kits/${kitId}/checkin`, {
       token: tokens.tech,
@@ -425,6 +486,70 @@ describe('работа без связи', () => {
     const today = new Date();
     const expected = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
     assert.equal(res.json().item.lastCheckOn, expected);
+  });
+});
+
+describe('оповещения', () => {
+  const sent: { kind: string; text: string; code?: string }[] = [];
+
+  before(() => {
+    setNotifier((event) => {
+      sent.push({ kind: event.kind, text: event.text, code: event.code });
+    });
+  });
+
+  after(() => resetNotifier());
+
+  test('о серьёзной поломке сообщают сразу, о мелочи — нет', async () => {
+    sent.length = 0;
+
+    await call('POST', `/api/v1/equipment/${ids.led}/defects`, {
+      token: tokens.tech,
+      body: { severity: 'low', description: 'Царапина на раме' }
+    });
+    assert.equal(sent.length, 0, 'мелочь никого не будит');
+
+    await call('POST', `/api/v1/equipment/${ids.led}/defects`, {
+      token: tokens.tech,
+      body: { severity: 'blocker', description: 'Не запускается процессор' }
+    });
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]!.kind, 'defect');
+    assert.equal(sent[0]!.code, 'LED-9001');
+    assert.match(sent[0]!.text, /не работает: Не запускается процессор/);
+    assert.match(sent[0]!.text, /Сергей Техник/);
+  });
+
+  test('невозврат с выезда тоже сообщается', async () => {
+    sent.length = 0;
+    const project = (
+      await call('POST', '/api/v1/projects', { token: tokens.tech, body: { title: 'Пропажа' } })
+    ).json().project;
+    const equipment = (
+      await call('POST', '/api/v1/equipment', {
+        token: tokens.tech,
+        body: { code: 'LOST-1', name: 'Радиосистема', category: 'Звук' }
+      })
+    ).json().item;
+    const kit = (
+      await call('POST', '/api/v1/kits', {
+        token: tokens.tech,
+        body: { projectId: project.id, name: 'Выезд с пропажей' }
+      })
+    ).json().kit;
+
+    await call('POST', `/api/v1/kits/${kit.id}/checkout`, {
+      token: tokens.tech,
+      body: { equipmentId: equipment.id }
+    });
+    await call('POST', `/api/v1/kits/${kit.id}/checkin`, {
+      token: tokens.tech,
+      body: { equipmentId: equipment.id, returnState: 'missing', note: 'нет в машине' }
+    });
+
+    assert.equal(sent.length, 1);
+    assert.equal(sent[0]!.code, 'LOST-1');
+    assert.match(sent[0]!.text, /Не вернулось с выезда/);
   });
 });
 

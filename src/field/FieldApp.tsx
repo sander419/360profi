@@ -30,6 +30,8 @@ import {
   loadKits,
   loadPhotos,
   newDefectId,
+  receiveRest,
+  similarEquipment,
   optimistic,
   outbox,
   perform,
@@ -748,6 +750,10 @@ const UnknownCodeScreen: React.FC<{ code: string; onCreated: () => void }> = ({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
 
+  // Дубли в такой системе появляются на второй неделе. Дешевле показать
+  // похожее прямо во время ввода, чем потом склеивать записи.
+  const similar = name.trim().length >= 3 ? similarEquipment(name) : [];
+
   const create = async (event: React.FormEvent) => {
     event.preventDefault();
     setBusy(true);
@@ -780,6 +786,28 @@ const UnknownCodeScreen: React.FC<{ code: string; onCreated: () => void }> = ({
           className="min-h-[52px] rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 text-base text-[var(--text)]"
         />
       </label>
+      {similar.length > 0 && (
+        <div className="rounded-2xl border border-[var(--warn)] bg-[var(--warn-dim)] p-3 text-sm">
+          <p className="font-medium" style={{ color: 'var(--warn)' }}>
+            Похожее уже заведено — может, это оно?
+          </p>
+          <ul className="mt-2 flex flex-col gap-1">
+            {similar.map((found) => (
+              <li key={found.id}>
+                <button
+                  type="button"
+                  onClick={() => go(`/eq/${encodeURIComponent(found.code)}`)}
+                  className="text-left underline decoration-[var(--border2)] underline-offset-4"
+                >
+                  {found.name}{' '}
+                  <span className="font-mono text-xs text-[var(--muted2)]">{found.code}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       <label className="flex flex-col gap-1 text-sm text-[var(--muted)]">
         Категория
         <input
@@ -1167,6 +1195,8 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
   if (error && !kit) return <Notice text={error} tone="error" />;
   if (!kit) return <p className="text-sm text-[var(--muted)]">Загружаем…</p>;
 
+  const pendingReturn = kit.items.filter((i) => i.checkedOutAt && !i.checkedInAt).length;
+
   const checkin = (equipmentId: string, code: string, state: 'ok' | 'damaged' | 'missing') => {
     const words = {
       ok: 'принято на склад',
@@ -1238,6 +1268,23 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
       <p className="-mt-2 px-1 text-xs text-[var(--muted2)]">
         Сканируйте всё, что кладёте в машину. Позиции, которой нет в списке, добавятся сами.
       </p>
+
+      {pendingReturn > 0 && kit.progress.loaded > 0 && (
+        <div className="flex flex-col gap-1">
+          <Button
+            tone="ok"
+            disabled={busy}
+            onClick={() =>
+              act(() => receiveRest(kit), `Принято целыми: ${pendingReturn}`)
+            }
+          >
+            Принять остальные целыми ({pendingReturn})
+          </Button>
+          <p className="px-1 text-xs text-[var(--muted2)]">
+            Сначала отметьте повреждённое и то, что не вернулось, — потом одну кнопку.
+          </p>
+        </div>
+      )}
 
       <div className="flex flex-col gap-2">
         {kit.items.map((item) => (

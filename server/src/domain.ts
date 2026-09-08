@@ -3,6 +3,7 @@
 
 import type { DatabaseSync } from 'node:sqlite';
 import { uid, nowIso, todayIso, isoDateOf } from './db.ts';
+import { notify } from './notify.ts';
 
 export type EquipmentStatus = 'stock' | 'project' | 'repair' | 'reserved' | 'transit';
 
@@ -207,6 +208,25 @@ export const openDefect = (
     note: `${params.severity}: ${params.description}`,
     occurredAt: params.occurredAt ?? null
   });
+
+  // О мелочах не пишем никому: оповещение, которое приходит на каждый скол,
+  // через неделю перестают читать.
+  if (params.severity !== 'low') {
+    const item = getEquipment(db, params.equipmentId);
+    const author = params.userId
+      ? (db.prepare('SELECT name FROM users WHERE id = ?').get(params.userId) as unknown as
+          | { name: string }
+          | undefined)
+      : undefined;
+    const severityWord = params.severity === 'blocker' ? 'не работает' : 'серьёзная поломка';
+    notify({
+      kind: 'defect',
+      code: item.code,
+      text: `${item.code} · ${item.name}
+${severityWord}: ${params.description}
+Отметил: ${author?.name ?? 'сотрудник'}`
+    });
+  }
 
   return { id };
 };

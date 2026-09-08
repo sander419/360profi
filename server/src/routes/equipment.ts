@@ -14,6 +14,14 @@ import {
 } from '../domain.ts';
 import type { EquipmentRow, EquipmentStatus } from '../domain.ts';
 
+// Категорию вводят руками и по-разному: «свет», «Свет », «СВЕТ». Без нормализации
+// фильтр по категориям через месяц превращается в кашу.
+const normalizeCategory = (value: string): string => {
+  const trimmed = value.trim().replace(/\s+/g, ' ');
+  if (trimmed.length === 0) return 'Разное';
+  return trimmed[0]!.toLocaleUpperCase('ru') + trimmed.slice(1).toLocaleLowerCase('ru');
+};
+
 // Код единицы — то, что печатается на QR-наклейке. Если не задан вручную,
 // выдаём следующий свободный номер вида EQ-0007.
 const nextCode = (db: FastifyInstance['ctx']['db']): string => {
@@ -166,7 +174,7 @@ export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
         id,
         code,
         body.name.trim(),
-        body.category.trim(),
+        normalizeCategory(body.category),
         body.serial ?? '',
         body.responsibleId ?? null,
         body.note ?? '',
@@ -214,7 +222,7 @@ export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
       for (const [key, column] of Object.entries(fields)) {
         if (body[key] !== undefined) {
           sets.push(`${column} = ?`);
-          params.push(body[key]);
+          params.push(key === 'category' && body[key] ? normalizeCategory(body[key]) : body[key]);
         }
       }
       if (sets.length === 0) throw new DomainError('Нечего обновлять');

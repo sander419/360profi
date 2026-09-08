@@ -299,6 +299,37 @@ export const createTrip = async (title: string): Promise<Kit> => {
   return kit;
 };
 
+/** Приём всего, что ещё не принято, целыми. Исключения отмечают до нажатия. */
+export const receiveRest = (kit: Kit): Promise<PerformResult> =>
+  perform({
+    path: `/api/v1/kits/${kit.id}/checkin-rest`,
+    label: `${kit.projectCode ?? kit.name} · приём остатка`,
+    apply: optimistic.receiveRest(kit.id)
+  });
+
+/** Похожее из того, что уже заведено. Считается по кешу, поэтому работает и без связи:
+ *  дубли обычно заводят именно в поле, где связи нет. */
+export const similarEquipment = (name: string, limit = 3): Equipment[] => {
+  const words = name
+    .toLocaleLowerCase('ru')
+    .replace(/[^\p{L}\p{N}\s-]/gu, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length >= 3);
+  if (words.length === 0) return [];
+
+  const cache = readCache();
+  return Object.values(cache.equipment)
+    .map((item) => {
+      const haystack = item.name.toLocaleLowerCase('ru');
+      const hits = words.filter((w) => haystack.includes(w)).length;
+      return { item, hits };
+    })
+    .filter((row) => row.hits > 0)
+    .sort((a, b) => b.hits - a.hits)
+    .slice(0, limit)
+    .map((row) => row.item);
+};
+
 /** Погрузка по коду с наклейки: позиции может не быть в списке — сервер добавит. */
 export const checkoutByCode = async (kitId: string, code: string): Promise<PerformResult> => {
   const found = await loadEquipmentByCode(code.trim().toUpperCase());
@@ -435,6 +466,28 @@ export const optimistic = {
   checkout: (kitId: string, equipmentId: string) => () => {
     patchKitItem(kitId, equipmentId, { checkedOutAt: new Date().toISOString(), status: 'project' });
     patchEquipment(equipmentId, { status: 'project' });
+  },
+  // Приём остатка: правим все погруженные и ещё не принятые позиции разом.
+  receiveRest: (kitId: string) => () => {
+    const cache = readCache();
+    const kit = cache.kits[kitId];
+    if (!kit) return;
+    const now = new Date().toISOString();
+    cache.kits[kitId] = recount({
+      ...kit,
+      items: kit.items.map((i) =>
+        i.checkedOutAt && !i.checkedInAt
+          ? { ...i, checkedInAt: now, returnState: 'ok', status: 'stock' }
+          : i
+      )
+    });
+    for (const item of kit.items) {
+      if (item.checkedOutAt && !item.checkedInAt) {
+        const current = cache.equipment[item.equipmentId];
+        if (current) cache.equipment[item.equipmentId] = { ...current, status: 'stock' };
+      }
+    }
+    writeCache(cache);
   },
   checkin: (kitId: string, equipmentId: string, state: 'ok' | 'damaged' | 'missing') => () => {
     const status: Equipment['status'] = state === 'damaged' ? 'repair' : 'stock';
