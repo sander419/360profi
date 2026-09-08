@@ -94,6 +94,17 @@ systemctl restart 360profi-api.service
 
 echo "==> nginx"
 sed -e "s/sklad.example.ru/$DOMAIN/g" -e "s|127.0.0.1:4000|127.0.0.1:$PORT|g"   "$APP_DIR/deploy/nginx.conf" > /etc/nginx/sites-available/360profi
+# Если на хосте принят общий сниппет защиты от сканеров — подключаем его,
+# чтобы сайт жил по тем же правилам, что и соседние.
+SNIPPET=/etc/nginx/snippets/block-scan.conf
+if [[ -f "$SNIPPET" ]]; then
+  awk -v snip="$SNIPPET" '
+    !done && /^    root / { print "    include " snip ";"; done = 1 }
+    { print }
+  ' /etc/nginx/sites-available/360profi > /tmp/360profi.site && \
+    mv /tmp/360profi.site /etc/nginx/sites-available/360profi
+fi
+
 ln -sf /etc/nginx/sites-available/360profi /etc/nginx/sites-enabled/360profi
 # Чужие сайты на этой машине не трогаем: ни default, ни соседние конфиги.
 # Reload вместо restart и только после nginx -t — если конфиг битый, ничего не упадёт.
