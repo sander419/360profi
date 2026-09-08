@@ -79,6 +79,12 @@ PIN хранится только как scrypt-хеш; после 10 неуда
 | GET | `/photos/:id?t=<токен>` | по токену | сам файл снимка |
 | POST | `/auth/login` | все | вход; каждая попытка пишется в `access_log` |
 | GET | `/status` | manager | состояние системы: цифры сервера и проверки сторожа |
+| GET | `/analytics?days=90` | manager | что ломается, что в ремонте, чем кончились выезды |
+| GET | `/announcements` | вход | команды руководства, актуальные лично мне |
+| POST | `/announcements/:id/ack` | вход | «понял» — подтверждение прочтения |
+| POST | `/announcements` | manager | сказать команде: текст, вид, аудитория |
+| GET | `/announcements/sent`, `/announcements/:id/reads` | manager | охват и кто не прочитал |
+| DELETE | `/announcements/:id` | manager | снять объявление с экранов |
 | GET | `/defects` | вход | открытые дефекты (или `?status=`) |
 | PATCH | `/defects/:id` | вход | `open` / `in_repair` / `closed` |
 | GET | `/projects`, POST `/projects` | вход | проекты (код придумается сам: `P-2609-1`) |

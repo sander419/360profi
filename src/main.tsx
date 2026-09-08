@@ -7,7 +7,7 @@ import './index.css';
 // Одна сборка обслуживает два режима: штаб (демо на localStorage) и полевой
 // режим, который ходит в API. Разделяет их хеш — так работает и на статике,
 // и на своём сервере, без правил переписывания URL.
-const FIELD_ROUTE = /^#\/(eq|kit|stock|queue|defects|trip|status|analytics|field)(\/|$)/;
+const FIELD_ROUTE = /^#\/(eq|kit|stock|queue|defects|trip|status|analytics|say|field)(\/|$)/;
 
 const isFieldMode = (): boolean => FIELD_ROUTE.test(window.location.hash);
 

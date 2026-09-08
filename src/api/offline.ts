@@ -37,10 +37,17 @@ interface CacheShape {
   equipment: Record<string, Equipment>;
   kits: Record<string, Kit>;
   defects: Defect[];
+  announcements: Announcement[];
   savedAt: string | null;
 }
 
-const emptyCache: CacheShape = { equipment: {}, kits: {}, defects: [], savedAt: null };
+const emptyCache: CacheShape = {
+  equipment: {},
+  kits: {},
+  defects: [],
+  announcements: [],
+  savedAt: null
+};
 
 const readCache = (): CacheShape => {
   try {
@@ -51,6 +58,7 @@ const readCache = (): CacheShape => {
       equipment: parsed.equipment ?? {},
       kits: parsed.kits ?? {},
       defects: parsed.defects ?? [],
+      announcements: parsed.announcements ?? [],
       savedAt: parsed.savedAt ?? null
     };
   } catch {
@@ -271,6 +279,74 @@ export interface SystemStatus {
   watchdogStale: boolean;
 }
 
+export interface Announcement {
+  id: string;
+  text: string;
+  kind: 'info' | 'task' | 'urgent';
+  audience: 'all' | 'tech' | 'manager';
+  author: string | null;
+  createdAt: string;
+  expiresAt: string | null;
+  acknowledged: boolean;
+}
+
+export interface SentAnnouncement extends Announcement {
+  reads: number;
+  audienceSize: number;
+}
+
+/** Объявления кешируются: на площадке без связи они нужны так же, как на складе. */
+export const loadAnnouncements = async (): Promise<Loaded<Announcement[]>> => {
+  try {
+    const { announcements } = await get<{ announcements: Announcement[] }>(
+      '/api/v1/announcements'
+    );
+    const cache = readCache();
+    cache.announcements = announcements;
+    writeCache(cache);
+    return fresh(announcements);
+  } catch (err) {
+    if (!isOffline(err)) throw err;
+    const cache = readCache();
+    return { data: cache.announcements ?? [], stale: true, savedAt: cache.savedAt };
+  }
+};
+
+/** Подтверждение идёт через очередь: «понял» нажимают и там, где связи нет. */
+export const acknowledge = (announcement: Announcement): Promise<PerformResult> =>
+  perform({
+    path: `/api/v1/announcements/${announcement.id}/ack`,
+    label: 'Объявление прочитано',
+    apply: () => {
+      const cache = readCache();
+      cache.announcements = (cache.announcements ?? []).map((a) =>
+        a.id === announcement.id ? { ...a, acknowledged: true } : a
+      );
+      writeCache(cache);
+    }
+  });
+
+export const createAnnouncement = (input: {
+  text: string;
+  kind: 'info' | 'task' | 'urgent';
+  audience: 'all' | 'tech' | 'manager';
+  days: number;
+}): Promise<{ id: string }> => post<{ id: string }>('/api/v1/announcements', input);
+
+export const loadSentAnnouncements = (): Promise<SentAnnouncement[]> =>
+  get<{ announcements: SentAnnouncement[] }>('/api/v1/announcements/sent').then(
+    (d) => d.announcements
+  );
+
+export const loadAnnouncementReads = (
+  id: string
+): Promise<{ read: { name: string; readAt: string }[]; notRead: { name: string; role: string }[] }> =>
+  get(`/api/v1/announcements/${id}/reads`);
+
+export const closeAnnouncement = async (id: string): Promise<void> => {
+  await request(`/api/v1/announcements/${id}`, 'DELETE');
+};
+
 export interface Analytics {
   periodDays: number;
   /** Мало событий — интерфейс обязан сказать об этом, а не рисовать «топы». */
@@ -316,6 +392,20 @@ export const loadTripSummary = async (
 // Заведение оборудования, проекта и выезда идёт напрямую, без очереди: сервер
 // возвращает идентификатор, на который тут же ссылаются следующие действия.
 // Отложить это невозможно, поэтому при отсутствии связи честно говорим об этом.
+
+// Простые запросы без тела: снять объявление, например.
+const request = async <T,>(path: string, method: string): Promise<T> => {
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, { method, headers: authHeaders() });
+  } catch {
+    throw new ApiError('Нужна связь', 0);
+  }
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!res.ok) throw new ApiError(data.error ?? `Ошибка ${res.status}`, res.status);
+  return data as T;
+};
 
 const post = async <T,>(path: string, body: Record<string, unknown>): Promise<T> => {
   if (!apiConfigured()) throw new ApiError('Адрес сервера не настроен', 0);

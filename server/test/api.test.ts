@@ -734,6 +734,123 @@ describe('снимки поломок', () => {
 });
 
 // Требования закона о персональных данных, проверяемые кодом, а не обещанием.
+// Смысл объявлений не в отправке, а в том, что видно, до кого дошло.
+describe('объявления руководства', () => {
+  let id = '';
+
+  test('техник объявления не пишет', async () => {
+    const res = await call('POST', '/api/v1/announcements', {
+      token: tokens.tech,
+      body: { text: 'Всем срочно на склад' }
+    });
+    assert.equal(res.statusCode, 403);
+  });
+
+  test('менеджер пишет, техник видит', async () => {
+    const created = await call('POST', '/api/v1/announcements', {
+      token: tokens.manager,
+      body: { text: 'В пятницу инвентаризация, склад закрыт с 15:00', kind: 'task' }
+    });
+    assert.equal(created.statusCode, 201);
+    id = created.json().id;
+
+    const mine = await call('GET', '/api/v1/announcements', { token: tokens.tech });
+    const found = mine.json().announcements.find((a: { id: string }) => a.id === id);
+    assert.ok(found, 'объявление дошло до техника');
+    assert.equal(found.acknowledged, false, 'пока не подтверждено');
+    assert.equal(found.author, 'Анна Менеджер');
+  });
+
+  test('автор считается прочитавшим сразу', async () => {
+    const reads = await call('GET', `/api/v1/announcements/${id}/reads`, {
+      token: tokens.manager
+    });
+    assert.deepEqual(
+      reads.json().read.map((r: { name: string }) => r.name),
+      ['Анна Менеджер']
+    );
+    assert.deepEqual(
+      reads.json().notRead.map((r: { name: string }) => r.name),
+      ['Сергей Техник'],
+      'видно поимённо, до кого не дошло'
+    );
+  });
+
+  test('подтверждение отмечает прочтение и повтор ничего не ломает', async () => {
+    assert.equal(
+      (await call('POST', `/api/v1/announcements/${id}/ack`, { token: tokens.tech, body: {} }))
+        .statusCode,
+      200
+    );
+    assert.equal(
+      (await call('POST', `/api/v1/announcements/${id}/ack`, { token: tokens.tech, body: {} }))
+        .statusCode,
+      200,
+      'повторное подтверждение — не ошибка: оно могло уйти из очереди дважды'
+    );
+
+    const reads = await call('GET', `/api/v1/announcements/${id}/reads`, {
+      token: tokens.manager
+    });
+    assert.equal(reads.json().read.length, 2);
+    assert.equal(reads.json().notRead.length, 0);
+  });
+
+  test('адресность работает: объявление для менеджеров технику не показывают', async () => {
+    const created = await call('POST', '/api/v1/announcements', {
+      token: tokens.manager,
+      body: { text: 'Планёрка по бюджету', audience: 'manager' }
+    });
+    const forManager = created.json().id;
+
+    const techSees = (await call('GET', '/api/v1/announcements', { token: tokens.tech }))
+      .json()
+      .announcements.map((a: { id: string }) => a.id);
+    assert.ok(!techSees.includes(forManager));
+
+    const managerSees = (await call('GET', '/api/v1/announcements', { token: tokens.manager }))
+      .json()
+      .announcements.map((a: { id: string }) => a.id);
+    assert.ok(managerSees.includes(forManager));
+  });
+
+  test('в списке отправленных виден охват', async () => {
+    const sent = await call('GET', '/api/v1/announcements/sent', { token: tokens.manager });
+    const row = sent.json().announcements.find((a: { id: string }) => a.id === id);
+    assert.equal(row.reads, 2);
+    assert.ok(row.audienceSize >= 2);
+  });
+
+  // Счётчик обязан мерить одно и то же в числителе и знаменателе.
+  test('в охват попадают только читатели из аудитории, включая автора', async () => {
+    const forTech = (
+      await call('POST', '/api/v1/announcements', {
+        token: tokens.manager,
+        body: { text: 'Только для техников', audience: 'tech' }
+      })
+    ).json().id;
+
+    const before = (await call('GET', '/api/v1/announcements/sent', { token: tokens.manager }))
+      .json()
+      .announcements.find((a: { id: string }) => a.id === forTech);
+    assert.equal(before.reads, 0, 'менеджер-автор не считается прочитавшим у объявления для техников');
+
+    await call('POST', `/api/v1/announcements/${forTech}/ack`, { token: tokens.tech, body: {} });
+
+    const after = (await call('GET', '/api/v1/announcements/sent', { token: tokens.manager }))
+      .json()
+      .announcements.find((a: { id: string }) => a.id === forTech);
+    assert.equal(after.reads, 1);
+    assert.equal(after.audienceSize, 1, 'в аудитории один техник');
+  });
+
+  test('снятое объявление уходит с экранов', async () => {
+    await call('DELETE', `/api/v1/announcements/${id}`, { token: tokens.manager });
+    const mine = await call('GET', '/api/v1/announcements', { token: tokens.tech });
+    assert.ok(!mine.json().announcements.some((a: { id: string }) => a.id === id));
+  });
+});
+
 describe('аналитика', () => {
   test('закрыта от техника', async () => {
     assert.equal((await call('GET', '/api/v1/analytics', { token: tokens.tech })).statusCode, 403);

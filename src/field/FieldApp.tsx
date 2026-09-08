@@ -25,7 +25,10 @@ import type {
   TripSummary
 } from '../api/client.ts';
 import {
+  acknowledge,
   changeDefectStatus,
+  closeAnnouncement,
+  createAnnouncement,
   checkoutByCode,
   createEquipment,
   createTrip,
@@ -37,7 +40,10 @@ import {
   loadKit,
   loadKits,
   loadAnalytics,
+  loadAnnouncementReads,
+  loadAnnouncements,
   loadPhotos,
+  loadSentAnnouncements,
   loadSystemStatus,
   loadTripSummary,
   newDefectId,
@@ -55,7 +61,7 @@ import {
 } from '../api/offline.ts';
 import { preparePhoto } from './photo.ts';
 import type { OutboxEntry } from '../api/outbox.ts';
-import type { Analytics, SystemStatus } from '../api/offline.ts';
+import type { Analytics, Announcement, SentAnnouncement, SystemStatus } from '../api/offline.ts';
 
 const STATUS_LABEL: Record<string, string> = {
   stock: 'На складе',
@@ -115,6 +121,7 @@ type Route =
   | { name: 'trip' }
   | { name: 'status' }
   | { name: 'analytics' }
+  | { name: 'say' }
   | { name: 'queue' };
 
 const parseHash = (): Route => {
@@ -127,6 +134,7 @@ const parseHash = (): Route => {
   if (section === 'trip') return { name: 'trip' };
   if (section === 'status') return { name: 'status' };
   if (section === 'analytics') return { name: 'analytics' };
+  if (section === 'say') return { name: 'say' };
   if (section === 'queue') return { name: 'queue' };
   return { name: 'home' };
 };
@@ -466,6 +474,245 @@ const NewTripScreen: React.FC = () => {
         {busy ? 'Создаём…' : 'Создать и грузить'}
       </button>
     </form>
+  );
+};
+
+const KIND_STYLE: Record<string, { bg: string; color: string; label: string }> = {
+  urgent: { bg: 'var(--bad-dim)', color: 'var(--bad)', label: 'Срочно' },
+  task: { bg: 'var(--warn-dim)', color: 'var(--warn)', label: 'Задача' },
+  info: { bg: 'var(--acc-dim)', color: 'var(--acc)', label: 'К сведению' }
+};
+
+// Объявление висит на рабочем экране, пока человек не нажмёт «Понял».
+// Это единственное, что отличает команду от сообщения в чате.
+const AnnouncementCard: React.FC<{
+  item: Announcement;
+  onAck: (item: Announcement) => void;
+  busy: boolean;
+}> = ({ item, onAck, busy }) => {
+  const style = KIND_STYLE[item.kind] ?? KIND_STYLE.info!;
+  return (
+    <article
+      className="flex flex-col gap-3 rounded-3xl border p-4"
+      style={{ borderColor: style.color, background: style.bg }}
+    >
+      <div className="flex items-baseline justify-between gap-2">
+        <span className="text-xs font-semibold uppercase tracking-wide" style={{ color: style.color }}>
+          {style.label}
+        </span>
+        <span className="text-xs text-[var(--muted2)]">
+          {item.author ?? 'руководство'} · {fmtDateTime(item.createdAt)}
+        </span>
+      </div>
+      <p className="whitespace-pre-wrap text-sm leading-relaxed text-[var(--text)]">{item.text}</p>
+      {item.acknowledged ? (
+        <p className="text-xs text-[var(--muted)]">Прочитано</p>
+      ) : (
+        <Button tone="accent" disabled={busy} onClick={() => onAck(item)}>
+          Понял
+        </Button>
+      )}
+    </article>
+  );
+};
+
+const AUDIENCES: [string, string][] = [
+  ['all', 'Всем'],
+  ['tech', 'Техникам'],
+  ['manager', 'Менеджерам']
+];
+
+const KINDS: [string, string][] = [
+  ['info', 'К сведению'],
+  ['task', 'Задача'],
+  ['urgent', 'Срочно']
+];
+
+// Экран руководителя: сказать всем и увидеть, до кого дошло.
+const SayScreen: React.FC = () => {
+  const [text, setText] = useState('');
+  const [kind, setKind] = useState<'info' | 'task' | 'urgent'>('info');
+  const [audience, setAudience] = useState<'all' | 'tech' | 'manager'>('all');
+  const [busy, setBusy] = useState(false);
+  const [done, setDone] = useState('');
+  const [error, setError] = useState('');
+  const [sent, setSent] = useState<SentAnnouncement[] | null>(null);
+  const [openReads, setOpenReads] = useState<string | null>(null);
+  const [reads, setReads] = useState<{
+    read: { name: string; readAt: string }[];
+    notRead: { name: string; role: string }[];
+  } | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setSent(await loadSentAnnouncements());
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Не удалось загрузить');
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  const send = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    setDone('');
+    try {
+      await createAnnouncement({ text: text.trim(), kind, audience, days: 14 });
+      setText('');
+      setDone('Отправлено. Ниже видно, кто уже прочитал');
+      await refresh();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Не отправилось');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const showReads = async (id: string) => {
+    if (openReads === id) {
+      setOpenReads(null);
+      return;
+    }
+    setOpenReads(id);
+    setReads(null);
+    try {
+      setReads(await loadAnnouncementReads(id));
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Не удалось загрузить');
+    }
+  };
+
+  return (
+    <>
+      <div>
+        <h1 className="text-lg font-bold">Сказать команде</h1>
+        <p className="mt-1 text-sm text-[var(--muted)]">
+          Объявление появится на рабочем экране и не уйдёт, пока человек не нажмёт «Понял».
+          Видно поимённо, до кого не дошло.
+        </p>
+      </div>
+
+      <form onSubmit={send} className="flex flex-col gap-3">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={4}
+          placeholder="В пятницу инвентаризация, склад закрыт с 15:00"
+          className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3 text-base text-[var(--text)]"
+        />
+
+        <div className="flex gap-2">
+          {KINDS.map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setKind(value as typeof kind)}
+              className={`min-h-[44px] flex-1 rounded-2xl border px-2 text-sm font-medium ${
+                kind === value
+                  ? 'border-[var(--acc)] bg-[var(--acc-dim)] text-[var(--text)]'
+                  : 'border-[var(--border)] text-[var(--muted)]'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        <div className="flex gap-2">
+          {AUDIENCES.map(([value, label]) => (
+            <button
+              key={value}
+              type="button"
+              onClick={() => setAudience(value as typeof audience)}
+              className={`min-h-[44px] flex-1 rounded-2xl border px-2 text-sm font-medium ${
+                audience === value
+                  ? 'border-[var(--acc)] bg-[var(--acc-dim)] text-[var(--text)]'
+                  : 'border-[var(--border)] text-[var(--muted)]'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {kind === 'urgent' && (
+          <p className="px-1 text-xs text-[var(--muted2)]">
+            Срочное дублируется в рабочий чат — до тех, кто сегодня не откроет приложение.
+          </p>
+        )}
+
+        {done && <Notice text={done} tone="ok" />}
+        {error && <Notice text={error} tone="error" />}
+
+        <button
+          type="submit"
+          disabled={busy || text.trim().length < 3}
+          className="min-h-[52px] rounded-2xl bg-[var(--acc)] text-base font-semibold text-white disabled:opacity-50"
+        >
+          {busy ? 'Отправляем…' : 'Отправить команде'}
+        </button>
+      </form>
+
+      <section className="flex flex-col gap-2">
+        <h2 className="px-1 text-sm font-semibold uppercase tracking-wide text-[var(--muted2)]">
+          Отправленные
+        </h2>
+        {sent?.length === 0 && <p className="px-1 text-sm text-[var(--muted)]">Пока ничего.</p>}
+        {sent?.map((item) => (
+          <article
+            key={item.id}
+            className="flex flex-col gap-2 rounded-2xl border border-[var(--border)] bg-[var(--surface)] p-3"
+          >
+            <p className="whitespace-pre-wrap text-sm">{item.text}</p>
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => void showReads(item.id)}
+                className="text-xs underline decoration-[var(--border2)] underline-offset-4"
+                style={{
+                  color: item.reads >= item.audienceSize ? 'var(--ok)' : 'var(--warn)'
+                }}
+              >
+                прочитали {item.reads} из {item.audienceSize}
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  await closeAnnouncement(item.id);
+                  await refresh();
+                }}
+                className="text-xs text-[var(--muted2)]"
+              >
+                снять
+              </button>
+            </div>
+
+            {openReads === item.id && (
+              <div className="rounded-2xl bg-[var(--bg)] p-3 text-xs">
+                {!reads && <p className="text-[var(--muted)]">Смотрим…</p>}
+                {reads && reads.notRead.length > 0 && (
+                  <p style={{ color: 'var(--warn)' }}>
+                    Не прочитали: {reads.notRead.map((p) => p.name).join(', ')}
+                  </p>
+                )}
+                {reads && reads.notRead.length === 0 && (
+                  <p style={{ color: 'var(--ok)' }}>Прочитали все</p>
+                )}
+                {reads && reads.read.length > 0 && (
+                  <p className="mt-1 text-[var(--muted2)]">
+                    Прочитали: {reads.read.map((p) => p.name).join(', ')}
+                  </p>
+                )}
+              </div>
+            )}
+          </article>
+        ))}
+      </section>
+    </>
   );
 };
 
@@ -920,6 +1167,19 @@ const HomeScreen: React.FC<{ user: SessionUser }> = ({ user }) => {
   const [kits, setKits] = useState<Kit[] | null>(null);
   const [stale, setStale] = useState<{ savedAt: string | null } | null>(null);
   const [error, setError] = useState('');
+  const [announcements, setAnnouncements] = useState<Announcement[]>([]);
+  const [ackBusy, setAckBusy] = useState(false);
+
+  const boss = user.role === 'admin' || user.role === 'manager';
+
+  const refreshAnnouncements = useCallback(async () => {
+    try {
+      const result = await loadAnnouncements();
+      setAnnouncements(result.data);
+    } catch {
+      // Объявления — не повод показывать ошибку на весь экран: работа важнее.
+    }
+  }, []);
 
   useEffect(() => {
     loadKits()
@@ -928,11 +1188,30 @@ const HomeScreen: React.FC<{ user: SessionUser }> = ({ user }) => {
         setStale(result.stale ? { savedAt: result.savedAt } : null);
       })
       .catch((err) => setError(err instanceof ApiError ? err.message : 'Не удалось загрузить'));
-  }, []);
+    void refreshAnnouncements();
+  }, [refreshAnnouncements]);
+
+  const ack = async (item: Announcement) => {
+    setAckBusy(true);
+    try {
+      await acknowledge(item);
+      setAnnouncements((list) =>
+        list.map((a) => (a.id === item.id ? { ...a, acknowledged: true } : a))
+      );
+    } finally {
+      setAckBusy(false);
+    }
+  };
+
+  const unread = announcements.filter((a) => !a.acknowledged);
 
   return (
     <>
       {stale && <StaleBanner savedAt={stale.savedAt} />}
+
+      {unread.map((item) => (
+        <AnnouncementCard key={item.id} item={item} onAck={ack} busy={ackBusy} />
+      ))}
 
       <section className="flex flex-col gap-3 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4">
         <h1 className="text-lg font-bold">Найти оборудование</h1>
@@ -999,15 +1278,22 @@ const HomeScreen: React.FC<{ user: SessionUser }> = ({ user }) => {
       <Button tone="accent" onClick={() => go('/trip')}>
         Новый выезд
       </Button>
-      <div className="flex gap-2">
-        <Button onClick={() => go('/stock')}>Весь склад</Button>
-        <Button onClick={() => go('/defects')}>Дефекты</Button>
-      </div>
-      {(user.role === 'admin' || user.role === 'manager') && (
-        <div className="flex gap-2">
-          <Button onClick={() => go('/analytics')}>Аналитика</Button>
+      <Button onClick={() => go('/stock')}>Весь склад</Button>
+
+      {boss && (
+        <section className="mt-2 flex flex-col gap-2 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4">
+          <h2 className="text-sm font-semibold uppercase tracking-wide text-[var(--muted2)]">
+            Управление
+          </h2>
+          <Button tone="accent" onClick={() => go('/say')}>
+            Сказать команде
+          </Button>
+          <div className="flex gap-2">
+            <Button onClick={() => go('/defects')}>Дефекты</Button>
+            <Button onClick={() => go('/analytics')}>Аналитика</Button>
+          </div>
           <Button onClick={() => go('/status')}>Состояние системы</Button>
-        </div>
+        </section>
       )}
     </>
   );
@@ -1891,6 +2177,7 @@ export const FieldApp: React.FC = () => {
       {route.name === 'trip' && <NewTripScreen />}
       {route.name === 'status' && <StatusScreen />}
       {route.name === 'analytics' && <AnalyticsScreen />}
+      {route.name === 'say' && <SayScreen />}
       {route.name === 'queue' && <QueueScreen />}
       {route.name === 'equipment' && <EquipmentScreen code={route.code} />}
       {route.name === 'kit' && <KitScreen id={route.id} />}
