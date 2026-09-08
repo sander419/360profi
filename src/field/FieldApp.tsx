@@ -36,6 +36,7 @@ import {
   loadHistory,
   loadKit,
   loadKits,
+  loadAnalytics,
   loadPhotos,
   loadSystemStatus,
   loadTripSummary,
@@ -54,7 +55,7 @@ import {
 } from '../api/offline.ts';
 import { preparePhoto } from './photo.ts';
 import type { OutboxEntry } from '../api/outbox.ts';
-import type { SystemStatus } from '../api/offline.ts';
+import type { Analytics, SystemStatus } from '../api/offline.ts';
 
 const STATUS_LABEL: Record<string, string> = {
   stock: 'На складе',
@@ -113,6 +114,7 @@ type Route =
   | { name: 'defects' }
   | { name: 'trip' }
   | { name: 'status' }
+  | { name: 'analytics' }
   | { name: 'queue' };
 
 const parseHash = (): Route => {
@@ -124,6 +126,7 @@ const parseHash = (): Route => {
   if (section === 'defects') return { name: 'defects' };
   if (section === 'trip') return { name: 'trip' };
   if (section === 'status') return { name: 'status' };
+  if (section === 'analytics') return { name: 'analytics' };
   if (section === 'queue') return { name: 'queue' };
   return { name: 'home' };
 };
@@ -466,6 +469,233 @@ const NewTripScreen: React.FC = () => {
   );
 };
 
+// Строка-столбик: доля от максимума, значение подписано прямо в строке.
+// Один показатель у разных предметов — значит одна серия и один цвет.
+// Раскрашивать позиции в разные цвета здесь нечем: это не разные сущности.
+const BarRow: React.FC<{ label: string; sub?: string; value: number; max: number }> = ({
+  label,
+  sub,
+  value,
+  max
+}) => (
+  <div className="flex flex-col gap-1">
+    <div className="flex items-baseline justify-between gap-3">
+      <span className="min-w-0 truncate text-sm">
+        {label}
+        {sub && <span className="ml-2 font-mono text-xs text-[var(--muted2)]">{sub}</span>}
+      </span>
+      <span className="font-mono text-sm font-semibold tabular-nums">{value}</span>
+    </div>
+    <div className="h-2 overflow-hidden rounded-full bg-[var(--border)]">
+      <div
+        className="h-full rounded-full bg-[var(--acc)]"
+        style={{ width: `${max > 0 ? Math.max(4, (value / max) * 100) : 0}%` }}
+      />
+    </div>
+  </div>
+);
+
+const Tile: React.FC<{ label: string; value: string | number; tone?: 'plain' | 'bad' | 'warn' }> = ({
+  label,
+  value,
+  tone = 'plain'
+}) => {
+  const color = tone === 'bad' ? 'var(--bad)' : tone === 'warn' ? 'var(--warn)' : 'var(--text)';
+  return (
+    <div className="rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3">
+      <div className="text-2xl font-bold tabular-nums" style={{ color }}>
+        {value}
+      </div>
+      <div className="mt-0.5 text-xs text-[var(--muted)]">{label}</div>
+    </div>
+  );
+};
+
+const PERIODS: [number, string][] = [
+  [30, '30 дней'],
+  [90, '90 дней'],
+  [365, 'год']
+];
+
+const AnalyticsScreen: React.FC = () => {
+  const [days, setDays] = useState(90);
+  const [data, setData] = useState<Analytics | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setData(null);
+    loadAnalytics(days)
+      .then(setData)
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Не удалось загрузить'));
+  }, [days]);
+
+  if (error) return <Notice text={error} tone="error" />;
+
+  const maxBroken = data ? Math.max(1, ...data.topBroken.map((t) => t.defects)) : 1;
+  const maxCategory = data ? Math.max(1, ...data.breakdownByCategory.map((c) => c.defects)) : 1;
+  const maxPerson = data ? Math.max(1, ...data.activity.byPerson.map((p) => p.actions)) : 1;
+
+  return (
+    <>
+      <h1 className="text-lg font-bold">Что происходит с оборудованием</h1>
+
+      <div className="flex gap-2">
+        {PERIODS.map(([value, label]) => (
+          <button
+            key={value}
+            type="button"
+            onClick={() => setDays(value)}
+            className={`min-h-[44px] flex-1 rounded-2xl border px-2 text-sm font-medium ${
+              days === value
+                ? 'border-[var(--acc)] bg-[var(--acc-dim)] text-[var(--text)]'
+                : 'border-[var(--border)] text-[var(--muted)]'
+            }`}
+          >
+            {label}
+          </button>
+        ))}
+      </div>
+
+      {!data && <p className="text-sm text-[var(--muted)]">Считаем…</p>}
+
+      {data && !data.enoughData && (
+        <Notice
+          tone="warn"
+          text="Данных пока мало: за период меньше десяти отметок. Цифры верны, но выводы по ним делать рано — нужен хотя бы месяц работы."
+        />
+      )}
+
+      {data && (
+        <>
+          <div className="grid grid-cols-2 gap-2 lg:grid-cols-4">
+            <Tile label="Единиц на учёте" value={data.totals.equipment} />
+            <Tile
+              label="Сейчас в ремонте"
+              value={data.totals.inRepair}
+              tone={data.totals.inRepair > 0 ? 'bad' : 'plain'}
+            />
+            <Tile label="Поломок за период" value={data.totals.defectsInPeriod} />
+            <Tile
+              label="Открытых дефектов"
+              value={data.totals.openDefects}
+              tone={data.totals.openDefects > 0 ? 'warn' : 'plain'}
+            />
+          </div>
+
+          <section className="flex flex-col gap-3 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4">
+            <h2 className="font-semibold">Проверки</h2>
+            <div className="grid grid-cols-3 gap-2">
+              <Tile label="Отметок за период" value={data.totals.checksInPeriod} />
+              <Tile
+                label="Не проверяли 60+ дней"
+                value={data.totals.staleChecks}
+                tone={data.totals.staleChecks > 0 ? 'warn' : 'plain'}
+              />
+              <Tile
+                label="Ни разу не проверяли"
+                value={data.totals.neverChecked}
+                tone={data.totals.neverChecked > 0 ? 'warn' : 'plain'}
+              />
+            </div>
+          </section>
+
+          {data.topBroken.length > 0 && (
+            <section className="flex flex-col gap-3 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4">
+              <h2 className="font-semibold">Что ломается чаще</h2>
+              <p className="-mt-2 text-xs text-[var(--muted2)]">Поломок за период, по единицам</p>
+              {data.topBroken.map((item) => (
+                <BarRow
+                  key={item.code}
+                  label={item.name}
+                  sub={item.code}
+                  value={item.defects}
+                  max={maxBroken}
+                />
+              ))}
+            </section>
+          )}
+
+          {data.breakdownByCategory.length > 0 && (
+            <section className="flex flex-col gap-3 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4">
+              <h2 className="font-semibold">По категориям</h2>
+              <p className="-mt-2 text-xs text-[var(--muted2)]">
+                Поломок за период; рядом — сколько разных единиц
+              </p>
+              {data.breakdownByCategory.map((cat) => (
+                <BarRow
+                  key={cat.label}
+                  label={cat.label}
+                  sub={`${cat.units} ед.`}
+                  value={cat.defects}
+                  max={maxCategory}
+                />
+              ))}
+            </section>
+          )}
+
+          <section className="flex flex-col gap-3 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4">
+            <h2 className="font-semibold">Ремонт и выезды</h2>
+            <dl className="flex flex-col gap-2 text-sm">
+              <div className="flex justify-between gap-3">
+                <dt className="text-[var(--muted)]">Ремонтов завершено</dt>
+                <dd className="font-mono font-semibold">{data.repair.finished}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-[var(--muted)]">Средний ремонт</dt>
+                <dd className="font-mono font-semibold">
+                  {data.repair.averageDays === null ? 'нет данных' : `${data.repair.averageDays} дн`}
+                </dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-[var(--muted)]">Самый долгий</dt>
+                <dd className="font-mono font-semibold">
+                  {data.repair.longestDays === null ? 'нет данных' : `${data.repair.longestDays} дн`}
+                </dd>
+              </div>
+              <div className="mt-2 flex justify-between gap-3">
+                <dt className="text-[var(--muted)]">Выездов за период</dt>
+                <dd className="font-mono font-semibold">
+                  {data.trips.total}, закрыто {data.trips.closed}
+                </dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-[var(--muted)]">Вернулось повреждённым</dt>
+                <dd className="font-mono font-semibold">{data.trips.damagedItems}</dd>
+              </div>
+              <div className="flex justify-between gap-3">
+                <dt className="text-[var(--muted)]">Не вернулось совсем</dt>
+                <dd
+                  className="font-mono font-semibold"
+                  style={{ color: data.trips.missingItems > 0 ? 'var(--bad)' : undefined }}
+                >
+                  {data.trips.missingItems}
+                </dd>
+              </div>
+            </dl>
+          </section>
+
+          {data.activity.byPerson.length > 0 && (
+            <section className="flex flex-col gap-3 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4">
+              <h2 className="font-semibold">Кто отмечает</h2>
+              <p className="-mt-2 text-xs text-[var(--muted2)]">
+                Отметок за период. Это про то, живёт ли система, а не про то, кто лучше работает.
+              </p>
+              {data.activity.byPerson.map((person) => (
+                <BarRow
+                  key={person.name}
+                  label={person.name}
+                  value={person.actions}
+                  max={maxPerson}
+                />
+              ))}
+            </section>
+          )}
+        </>
+      )}
+    </>
+  );
+};
+
 // Состояние системы для того, кто за неё отвечает: проверить с телефона,
 // а не идти по ssh. Показываем то, по чему видно беду: сторож молчит, бэкап
 // старый, диск кончается, сертификат истекает.
@@ -774,7 +1004,10 @@ const HomeScreen: React.FC<{ user: SessionUser }> = ({ user }) => {
         <Button onClick={() => go('/defects')}>Дефекты</Button>
       </div>
       {(user.role === 'admin' || user.role === 'manager') && (
-        <Button onClick={() => go('/status')}>Состояние системы</Button>
+        <div className="flex gap-2">
+          <Button onClick={() => go('/analytics')}>Аналитика</Button>
+          <Button onClick={() => go('/status')}>Состояние системы</Button>
+        </div>
       )}
     </>
   );
@@ -1657,6 +1890,7 @@ export const FieldApp: React.FC = () => {
       {route.name === 'defects' && <DefectsScreen user={user} />}
       {route.name === 'trip' && <NewTripScreen />}
       {route.name === 'status' && <StatusScreen />}
+      {route.name === 'analytics' && <AnalyticsScreen />}
       {route.name === 'queue' && <QueueScreen />}
       {route.name === 'equipment' && <EquipmentScreen code={route.code} />}
       {route.name === 'kit' && <KitScreen id={route.id} />}

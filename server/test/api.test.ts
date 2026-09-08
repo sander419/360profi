@@ -734,6 +734,74 @@ describe('снимки поломок', () => {
 });
 
 // Требования закона о персональных данных, проверяемые кодом, а не обещанием.
+describe('аналитика', () => {
+  test('закрыта от техника', async () => {
+    assert.equal((await call('GET', '/api/v1/analytics', { token: tokens.tech })).statusCode, 403);
+  });
+
+  test('считает поломки по единицам и категориям', async () => {
+    const { analytics } = (
+      await call('GET', '/api/v1/analytics?days=365', { token: tokens.manager })
+    ).json();
+
+    assert.ok(analytics.totals.equipment > 0);
+    assert.ok(analytics.totals.defectsInPeriod > 0, 'дефекты за период посчитаны');
+    assert.ok(analytics.topBroken.length > 0, 'есть список того, что ломается чаще');
+    assert.ok(
+      analytics.topBroken[0].defects >= analytics.topBroken.at(-1).defects,
+      'список отсортирован по убыванию'
+    );
+    assert.ok(analytics.breakdownByCategory.length > 0);
+    assert.ok(
+      analytics.breakdownByCategory.every((c: { units: number }) => c.units > 0),
+      'в каждой категории считаются единицы, а не только дефекты'
+    );
+  });
+
+  test('период сужает выборку', async () => {
+    const wide = (
+      await call('GET', '/api/v1/analytics?days=365', { token: tokens.manager })
+    ).json().analytics;
+    const narrow = (
+      await call('GET', '/api/v1/analytics?days=1', { token: tokens.manager })
+    ).json().analytics;
+
+    assert.equal(narrow.periodDays, 1);
+    assert.ok(narrow.totals.defectsInPeriod <= wide.totals.defectsInPeriod);
+  });
+
+  test('считает длительность ремонта по журналу', async () => {
+    // Единицу отправляли в ремонт и возвращали в тестах выше.
+    const { analytics } = (
+      await call('GET', '/api/v1/analytics?days=365', { token: tokens.manager })
+    ).json();
+    assert.ok(analytics.repair.finished >= 0);
+    if (analytics.repair.finished > 0) {
+      assert.equal(typeof analytics.repair.averageDays, 'number');
+    } else {
+      assert.equal(analytics.repair.averageDays, null, 'без завершённых ремонтов среднего нет');
+    }
+  });
+
+  test('на пустой базе не выдумывает выводов', async () => {
+    const empty = openDb(':memory:');
+    const emptyApp = await buildApp({ db: empty });
+    const res = await emptyApp.inject({
+      method: 'GET',
+      url: '/api/v1/analytics',
+      headers: { authorization: `Bearer ${tokens.manager}` }
+    });
+    const { analytics } = res.json();
+
+    assert.equal(analytics.enoughData, false, 'честно говорит, что данных мало');
+    assert.deepEqual(analytics.topBroken, []);
+    assert.equal(analytics.repair.averageDays, null);
+
+    await emptyApp.close();
+    empty.close();
+  });
+});
+
 describe('состояние системы', () => {
   test('техник состояние сервера не смотрит, менеджер смотрит', async () => {
     assert.equal((await call('GET', '/api/v1/status', { token: tokens.tech })).statusCode, 403);

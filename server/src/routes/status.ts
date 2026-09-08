@@ -8,6 +8,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import { defaultDbPath } from '../db.ts';
+import { buildAnalytics } from '../analytics.ts';
 
 interface WatchdogState {
   checkedAt: string;
@@ -52,6 +53,13 @@ const dbBytes = (): number => {
 export const statusRoutes = async (app: FastifyInstance): Promise<void> => {
   const { db } = app.ctx;
   const managers = app.guard(['admin', 'manager']);
+
+  // Аналитика рядом со статусом: и то и другое — «как оно всё в целом»,
+  // и смотрит на них один и тот же человек.
+  app.get('/analytics', { preHandler: managers }, async (req) => {
+    const { days } = req.query as { days?: string };
+    return { analytics: buildAnalytics(db, Number(days) || 90) };
+  });
 
   app.get('/status', { preHandler: managers }, async () => {
     const one = (sql: string): number =>

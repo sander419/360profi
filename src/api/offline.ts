@@ -271,6 +271,29 @@ export interface SystemStatus {
   watchdogStale: boolean;
 }
 
+export interface Analytics {
+  periodDays: number;
+  /** Мало событий — интерфейс обязан сказать об этом, а не рисовать «топы». */
+  enoughData: boolean;
+  totals: {
+    equipment: number;
+    inRepair: number;
+    defectsInPeriod: number;
+    openDefects: number;
+    neverChecked: number;
+    staleChecks: number;
+    checksInPeriod: number;
+  };
+  breakdownByCategory: { label: string; defects: number; units: number }[];
+  topBroken: { code: string; name: string; category: string; defects: number; open: number }[];
+  repair: { finished: number; averageDays: number | null; longestDays: number | null };
+  trips: { total: number; closed: number; missingItems: number; damagedItems: number };
+  activity: { total: number; byPerson: { name: string; actions: number }[] };
+}
+
+export const loadAnalytics = (days: number): Promise<Analytics> =>
+  get<{ analytics: Analytics }>(`/api/v1/analytics?days=${days}`).then((d) => d.analytics);
+
 /** Состояние системы: живо ли всё, свежий ли бэкап, не кончается ли сертификат. */
 export const loadSystemStatus = (): Promise<SystemStatus> => get<SystemStatus>('/api/v1/status');
 
