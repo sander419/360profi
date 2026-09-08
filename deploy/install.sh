@@ -10,6 +10,7 @@
 set -euo pipefail
 
 DOMAIN="${DOMAIN:-}"
+PORT="${PORT:-4000}"
 REPO="${REPO:-https://github.com/sander419/360profi.git}"
 APP_DIR=/opt/360profi
 DATA_DIR=/var/lib/360profi
@@ -36,6 +37,11 @@ if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | cut -c2- | cut -d. -f1)"
   apt-get install -y -qq nodejs >/dev/null
 fi
 echo "    node $(node -v)"
+
+if ss -tln 2>/dev/null | grep -q ":$PORT "; then
+  echo "Порт $PORT уже занят. Запустите с другим: sudo DOMAIN=$DOMAIN PORT=4100 bash deploy/install.sh" >&2
+  exit 1
+fi
 
 echo "==> Пользователь и каталоги"
 id -u profi360 >/dev/null 2>&1 || useradd --system --home "$APP_DIR" --shell /usr/sbin/nologin profi360
@@ -78,7 +84,7 @@ chown -R profi360:profi360 "$APP_DIR" "$DATA_DIR" /var/backups/360profi
 chmod +x "$APP_DIR/deploy/backup.sh"
 
 echo "==> systemd"
-cp "$APP_DIR/deploy/360profi-api.service" /etc/systemd/system/
+sed "s/^Environment=PORT=.*/Environment=PORT=$PORT/"   "$APP_DIR/deploy/360profi-api.service" > /etc/systemd/system/360profi-api.service
 cp "$APP_DIR/deploy/360profi-backup.service" /etc/systemd/system/
 cp "$APP_DIR/deploy/360profi-backup.timer" /etc/systemd/system/
 systemctl daemon-reload
@@ -87,15 +93,16 @@ systemctl enable --now 360profi-backup.timer
 systemctl restart 360profi-api.service
 
 echo "==> nginx"
-sed "s/sklad.example.ru/$DOMAIN/g" "$APP_DIR/deploy/nginx.conf" > /etc/nginx/sites-available/360profi
+sed -e "s/sklad.example.ru/$DOMAIN/g" -e "s|127.0.0.1:4000|127.0.0.1:$PORT|g"   "$APP_DIR/deploy/nginx.conf" > /etc/nginx/sites-available/360profi
 ln -sf /etc/nginx/sites-available/360profi /etc/nginx/sites-enabled/360profi
-rm -f /etc/nginx/sites-enabled/default
+# Чужие сайты на этой машине не трогаем: ни default, ни соседние конфиги.
+# Reload вместо restart и только после nginx -t — если конфиг битый, ничего не упадёт.
 nginx -t
 systemctl reload nginx
 
 echo "==> Проверка"
 sleep 2
-curl -fsS http://127.0.0.1:4000/api/v1/health && echo
+curl -fsS "http://127.0.0.1:$PORT/api/v1/health" && echo
 
 cat <<EOF
 
@@ -107,6 +114,7 @@ cat <<EOF
   3. Наклейки:       PUBLIC_APP_URL=https://$DOMAIN/ sudo -u profi360 node src/labels.ts
   4. Открыть:        https://$DOMAIN/#/field
 
+Порт API:  127.0.0.1:$PORT (наружу только через nginx)
 Логи:      journalctl -u 360profi-api -f
 Бэкапы:    systemctl list-timers 360profi-backup, файлы в /var/backups/360profi
 Обновление: sudo DOMAIN=$DOMAIN bash $APP_DIR/deploy/install.sh
