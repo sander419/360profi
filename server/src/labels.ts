@@ -3,6 +3,8 @@
 //   node src/labels.ts                      все единицы
 //   node src/labels.ts --category=LED       только категория
 //   node src/labels.ts --new                только те, у кого ещё не печатали (по дате заведения)
+//   node src/labels.ts --blank=24           пачка пустых наклеек: клеим на железку,
+//                                           сканируем и заводим прямо на складе
 //
 // Размер ячейки — 70×37 мм, это стандартный лист самоклейки 3×8 (Avery L7160).
 // QR ведёт на карточку в полевом режиме: PUBLIC_APP_URL + #/eq/<код>.
@@ -20,8 +22,33 @@ const APP_URL = (process.env.PUBLIC_APP_URL ?? 'https://sander419.github.io/360p
 const args = process.argv.slice(2);
 const categoryArg = args.find((a) => a.startsWith('--category='))?.split('=')[1];
 const onlyNew = args.includes('--new');
+const blankCount = Number(args.find((a) => a.startsWith('--blank='))?.split('=')[1] ?? 0);
 
 const db = openDb();
+
+// Пустые наклейки: код есть, а оборудования за ним ещё нет. Клеятся на железку,
+// сканируются, и приложение предлагает завести единицу прямо на месте. Так реестр
+// набирается по ходу дела, а не вечерами в таблице.
+const blankCodes = (count: number): { code: string; name: string; category: string }[] => {
+  const taken = new Set(
+    (db.prepare('SELECT code FROM equipment').all() as unknown as { code: string }[]).map(
+      (r) => r.code
+    )
+  );
+  const alphabet = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // без похожих 0/O и 1/I
+  const codes: { code: string; name: string; category: string }[] = [];
+  while (codes.length < count) {
+    let suffix = '';
+    for (let i = 0; i < 5; i += 1) {
+      suffix += alphabet[Math.floor(Math.random() * alphabet.length)];
+    }
+    const code = `EQ-${suffix}`;
+    if (taken.has(code)) continue;
+    taken.add(code);
+    codes.push({ code, name: 'Свободная наклейка — отсканируйте и заведите', category: '' });
+  }
+  return codes;
+};
 
 const where: string[] = [];
 const params: string[] = [];
@@ -33,13 +60,16 @@ if (onlyNew) {
   where.push("created_at > datetime('now', '-30 days')");
 }
 
-const items = db
-  .prepare(
-    `SELECT code, name, category FROM equipment
+const items =
+  blankCount > 0
+    ? blankCodes(blankCount)
+    : (db
+        .prepare(
+          `SELECT code, name, category FROM equipment
      ${where.length ? `WHERE ${where.join(' AND ')}` : ''}
      ORDER BY category, code`
-  )
-  .all(...params) as unknown as { code: string; name: string; category: string }[];
+        )
+        .all(...params) as unknown as { code: string; name: string; category: string }[]);
 
 if (items.length === 0) {
   console.log('Под фильтр ничего не попало — наклейки не нужны.');
@@ -96,7 +126,10 @@ ${cells.join('\n')}
 
 const outDir = path.join(SERVER_ROOT, 'out');
 fs.mkdirSync(outDir, { recursive: true });
-const outFile = path.join(outDir, categoryArg ? `labels-${categoryArg}.html` : 'labels.html');
+const outFile = path.join(
+  outDir,
+  blankCount > 0 ? 'labels-blank.html' : categoryArg ? `labels-${categoryArg}.html` : 'labels.html'
+);
 fs.writeFileSync(outFile, html, 'utf8');
 
 console.log(`Наклеек: ${items.length}`);

@@ -132,19 +132,36 @@ describe('оборудование', () => {
     assert.equal(missing.statusCode, 404);
   });
 
-  test('техник не может заводить оборудование, менеджер может', async () => {
-    const denied = await call('POST', '/api/v1/equipment', {
-      token: tokens.tech,
-      body: { name: 'Новый прибор', category: 'Свет' }
-    });
-    assert.equal(denied.statusCode, 403);
-
+  // Железка появляется в руках у техника, а не в голове у менеджера: если
+  // завести её может только менеджер, склад так и останется незаведённым.
+  test('оборудование заводит любой сотрудник, автор попадает в журнал', async () => {
     const created = await call('POST', '/api/v1/equipment', {
-      token: tokens.manager,
+      token: tokens.tech,
       body: { name: 'Новый прибор', category: 'Свет' }
     });
     assert.equal(created.statusCode, 201);
     assert.match(created.json().item.code, /^EQ-\d{4}$/);
+
+    const history = await call('GET', `/api/v1/equipment/${created.json().item.id}/history`, {
+      token: tokens.tech
+    });
+    assert.equal(history.json().events[0].kind, 'created');
+    assert.equal(history.json().events[0].userName, 'Сергей Техник');
+  });
+
+  test('код с наклейки можно задать вручную', async () => {
+    const created = await call('POST', '/api/v1/equipment', {
+      token: tokens.tech,
+      body: { code: 'SND-7777', name: 'Колонка со склада', category: 'Звук' }
+    });
+    assert.equal(created.statusCode, 201);
+    assert.equal(created.json().item.code, 'SND-7777');
+
+    const duplicate = await call('POST', '/api/v1/equipment', {
+      token: tokens.tech,
+      body: { code: 'SND-7777', name: 'Она же', category: 'Звук' }
+    });
+    assert.equal(duplicate.statusCode, 409);
   });
 
   test('статус «на проекте» без проекта отклоняется', async () => {
@@ -276,6 +293,68 @@ describe('комплект на выезд', () => {
       body: { equipmentId: ids.broken, returnState: 'ok' }
     });
     assert.equal(res.statusCode, 400);
+  });
+});
+
+// Компания без процессов не заведёт проект с кодом и не соберёт комплект заранее.
+// Эти проверки закрепляют, что система работает, когда никто ничего не подготовил.
+describe('работа без подготовки', () => {
+  let kitId = '';
+  let projectId = '';
+  let freshId = '';
+
+  test('проект заводит любой сотрудник, код придумывается сам', async () => {
+    const res = await call('POST', '/api/v1/projects', {
+      token: tokens.tech,
+      body: { title: 'Свадьба в Лофте' }
+    });
+    assert.equal(res.statusCode, 201);
+    assert.match(res.json().project.code, /^P-\d{4}-\d+$/);
+    projectId = res.json().project.id;
+  });
+
+  test('выезд создаёт тот, кто грузит, пустым', async () => {
+    const res = await call('POST', '/api/v1/kits', {
+      token: tokens.tech,
+      body: { projectId, name: 'Что взяли' }
+    });
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.json().kit.progress.total, 0);
+    kitId = res.json().kit.id;
+  });
+
+  test('скан позиции, которой нет в списке, добавляет её и грузит', async () => {
+    // Заводим единицу здесь же: ровно так это и происходит на складе —
+    // человек наклеил стикер, завёл и сразу грузит.
+    const created = await call('POST', '/api/v1/equipment', {
+      token: tokens.tech,
+      body: { code: 'RIG-7001', name: 'Стойка со склада', category: 'Риггинг' }
+    });
+    assert.equal(created.statusCode, 201);
+    freshId = created.json().item.id;
+
+    const res = await call('POST', `/api/v1/kits/${kitId}/checkout`, {
+      token: tokens.tech,
+      body: { equipmentId: freshId }
+    });
+    assert.equal(res.statusCode, 200, res.body);
+    assert.equal(res.json().kit.progress.total, 1, 'позиция появилась в комплекте');
+    assert.equal(res.json().kit.progress.loaded, 1);
+
+    const item = await call('GET', `/api/v1/equipment/${freshId}`, { token: tokens.tech });
+    assert.equal(item.json().item.projectId, projectId, 'единица уехала на этот проект');
+  });
+
+  test('в ремонте на выезд не уходит даже сканом', async () => {
+    const res = await call('POST', `/api/v1/kits/${kitId}/checkout`, {
+      token: tokens.tech,
+      body: { equipmentId: ids.broken }
+    });
+    assert.equal(res.statusCode, 400);
+    assert.match(res.json().error, /ремонте/);
+
+    const kit = await call('GET', `/api/v1/kits/${kitId}`, { token: tokens.tech });
+    assert.equal(kit.json().kit.progress.total, 1, 'отклонённая позиция в комплект не попала');
   });
 });
 

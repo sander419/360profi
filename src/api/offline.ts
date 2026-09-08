@@ -249,6 +249,67 @@ export const loadPhotos = async (equipmentId: string): Promise<Photo[]> => {
   }
 };
 
+// --- создание сущностей ------------------------------------------------------
+//
+// Заведение оборудования, проекта и выезда идёт напрямую, без очереди: сервер
+// возвращает идентификатор, на который тут же ссылаются следующие действия.
+// Отложить это невозможно, поэтому при отсутствии связи честно говорим об этом.
+
+const post = async <T,>(path: string, body: Record<string, unknown>): Promise<T> => {
+  if (!apiConfigured()) throw new ApiError('Адрес сервера не настроен', 0);
+  let res: Response;
+  try {
+    res = await fetch(`${API_URL}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...authHeaders() },
+      body: JSON.stringify(body)
+    });
+  } catch {
+    throw new ApiError('Нужна связь: завести это без сети нельзя', 0);
+  }
+  if (res.status === 401) {
+    clearSession();
+    throw new ApiError('Нужен вход в систему', 401);
+  }
+  const text = await res.text();
+  const data = text ? JSON.parse(text) : {};
+  if (!res.ok) throw new ApiError(data.error ?? `Ошибка ${res.status}`, res.status);
+  return data as T;
+};
+
+export const createEquipment = async (input: {
+  code?: string;
+  name: string;
+  category: string;
+}): Promise<Equipment> => {
+  const { item } = await post<{ item: Equipment }>('/api/v1/equipment', input);
+  cacheEquipment([item]);
+  return item;
+};
+
+export const createTrip = async (title: string): Promise<Kit> => {
+  const { project } = await post<{ project: { id: string; code: string } }>('/api/v1/projects', {
+    title
+  });
+  const { kit } = await post<{ kit: Kit }>('/api/v1/kits', {
+    projectId: project.id,
+    name: title
+  });
+  cacheKit(kit);
+  return kit;
+};
+
+/** Погрузка по коду с наклейки: позиции может не быть в списке — сервер добавит. */
+export const checkoutByCode = async (kitId: string, code: string): Promise<PerformResult> => {
+  const found = await loadEquipmentByCode(code.trim().toUpperCase());
+  return perform({
+    path: `/api/v1/kits/${kitId}/checkout`,
+    body: { equipmentId: found.data.id },
+    label: `${found.data.code} · погрузка`,
+    apply: optimistic.checkout(kitId, found.data.id)
+  });
+};
+
 // --- запись через очередь ----------------------------------------------------
 
 const sendEntry = async (entry: OutboxEntry): Promise<Response> => {

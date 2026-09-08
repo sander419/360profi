@@ -27,7 +27,6 @@ const nextCode = (db: FastifyInstance['ctx']['db']): string => {
 export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
   const { db } = app.ctx;
   const anyUser = app.guard([]);
-  const managers = app.guard(['admin', 'manager']);
 
   app.get('/', { preHandler: anyUser }, async (req) => {
     const q = req.query as {
@@ -127,7 +126,7 @@ export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
   app.post(
     '/',
     {
-      preHandler: managers,
+      preHandler: anyUser,
       schema: {
         body: {
           type: 'object',
@@ -183,7 +182,7 @@ export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
   app.patch(
     '/:id',
     {
-      preHandler: managers,
+      preHandler: anyUser,
       schema: {
         body: {
           type: 'object',

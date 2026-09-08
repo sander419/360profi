@@ -6,6 +6,21 @@ import { DomainError } from '../domain.ts';
 import { hashPin, randomPin } from '../auth.ts';
 import type { Role } from '../auth.ts';
 
+// Код проекта вида P-2609-3: месяц и порядковый номер. Придумывать его руками
+// в компании без нумерации проектов — лишний барьер на пути к первой отметке.
+const nextProjectCode = (db: FastifyInstance['ctx']['db']): string => {
+  const now = new Date();
+  const prefix = `P-${String(now.getFullYear()).slice(2)}${String(now.getMonth() + 1).padStart(2, '0')}`;
+  const rows = db
+    .prepare(`SELECT code FROM projects WHERE code LIKE '${prefix}-%'`)
+    .all() as unknown as { code: string }[];
+  const last = rows.reduce((max, row) => {
+    const n = Number(row.code.slice(prefix.length + 1));
+    return Number.isFinite(n) && n > max ? n : max;
+  }, 0);
+  return `${prefix}-${last + 1}`;
+};
+
 export const catalogRoutes = async (app: FastifyInstance): Promise<void> => {
   const { db } = app.ctx;
   const anyUser = app.guard([]);
@@ -34,11 +49,11 @@ export const catalogRoutes = async (app: FastifyInstance): Promise<void> => {
   app.post(
     '/projects',
     {
-      preHandler: managers,
+      preHandler: anyUser,
       schema: {
         body: {
           type: 'object',
-          required: ['code', 'title'],
+          required: ['title'],
           properties: {
             code: { type: 'string', minLength: 1, maxLength: 40 },
             title: { type: 'string', minLength: 1, maxLength: 200 },
@@ -49,15 +64,16 @@ export const catalogRoutes = async (app: FastifyInstance): Promise<void> => {
       }
     },
     async (req, reply) => {
-      const body = req.body as { code: string; title: string; venue?: string; startsOn?: string };
-      if (db.prepare('SELECT 1 FROM projects WHERE code = ?').get(body.code)) {
-        throw new DomainError(`Проект с кодом ${body.code} уже есть`, 409);
+      const body = req.body as { code?: string; title: string; venue?: string; startsOn?: string };
+      const code = body.code?.trim() || nextProjectCode(db);
+      if (db.prepare('SELECT 1 FROM projects WHERE code = ?').get(code)) {
+        throw new DomainError(`Проект с кодом ${code} уже есть`, 409);
       }
       const id = uid();
       db.prepare(
         'INSERT INTO projects (id, code, title, venue, starts_on, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)'
-      ).run(id, body.code, body.title, body.venue ?? '', body.startsOn ?? null, 'active', nowIso());
-      return reply.code(201).send({ project: { id, code: body.code, title: body.title } });
+      ).run(id, code, body.title, body.venue ?? '', body.startsOn ?? null, 'active', nowIso());
+      return reply.code(201).send({ project: { id, code, title: body.title } });
     }
   );
 

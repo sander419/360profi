@@ -88,7 +88,6 @@ const kitPayload = (db: FastifyInstance['ctx']['db'], kit: KitRow) => {
 export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
   const { db } = app.ctx;
   const anyUser = app.guard([]);
-  const managers = app.guard(['admin', 'manager']);
 
   app.get('/', { preHandler: anyUser }, async (req) => {
     const { projectId } = req.query as { projectId?: string };
@@ -108,7 +107,7 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
   app.post(
     '/',
     {
-      preHandler: managers,
+      preHandler: anyUser,
       schema: {
         body: {
           type: 'object',
@@ -153,7 +152,7 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
   app.post(
     '/:id/items',
     {
-      preHandler: managers,
+      preHandler: anyUser,
       schema: {
         body: {
           type: 'object',
@@ -176,7 +175,7 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
     }
   );
 
-  app.delete('/:id/items/:equipmentId', { preHandler: managers }, async (req) => {
+  app.delete('/:id/items/:equipmentId', { preHandler: anyUser }, async (req) => {
     const { id, equipmentId } = req.params as { id: string; equipmentId: string };
     const kit = getKit(db, id);
     const item = db
@@ -214,15 +213,28 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
       const item = db
         .prepare('SELECT checked_out_at FROM kit_items WHERE kit_id = ? AND equipment_id = ?')
         .get(id, body.equipmentId) as { checked_out_at: string | null } | undefined;
-      if (!item) throw new DomainError('Этой позиции нет в комплекте', 404);
-      if (item.checked_out_at) throw new DomainError('Позиция уже отмечена как отгруженная', 409);
+      if (item?.checked_out_at) {
+        throw new DomainError('Позиция уже отмечена как отгруженная', 409);
+      }
 
+      // Сначала все запреты, потом запись: иначе отклонённая единица всё равно
+      // оседает в списке комплекта, потому что запрос не в транзакции.
       const equipment = getEquipment(db, body.equipmentId);
       if (equipment.status === 'repair') {
         throw new DomainError('Оборудование в ремонте — на выезд его брать нельзя');
       }
       if (equipment.status === 'project' && equipment.project_id !== kit.project_id) {
         throw new DomainError('Оборудование уже на другом проекте', 409);
+      }
+
+      // Позиции нет в списке — значит, список составлял не тот, кто грузит.
+      // Добавляем на лету: важнее знать, что реально уехало, чем соблюсти план.
+      if (!item) {
+        db.prepare('INSERT INTO kit_items (kit_id, equipment_id, added_at) VALUES (?, ?, ?)').run(
+          id,
+          body.equipmentId,
+          occurredAt ?? nowIso()
+        );
       }
 
       db.prepare(

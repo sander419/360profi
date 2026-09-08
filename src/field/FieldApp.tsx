@@ -18,6 +18,9 @@ import {
 import type { Defect, Equipment, HistoryEvent, Kit, Photo, SessionUser } from '../api/client.ts';
 import {
   changeDefectStatus,
+  checkoutByCode,
+  createEquipment,
+  createTrip,
   dropFailed,
   loadDefects,
   loadEquipmentByCode,
@@ -94,6 +97,7 @@ type Route =
   | { name: 'kit'; id: string }
   | { name: 'stock' }
   | { name: 'defects' }
+  | { name: 'trip' }
   | { name: 'queue' };
 
 const parseHash = (): Route => {
@@ -103,6 +107,7 @@ const parseHash = (): Route => {
   if (section === 'kit' && value) return { name: 'kit', id: value };
   if (section === 'stock') return { name: 'stock' };
   if (section === 'defects') return { name: 'defects' };
+  if (section === 'trip') return { name: 'trip' };
   if (section === 'queue') return { name: 'queue' };
   return { name: 'home' };
 };
@@ -396,6 +401,53 @@ const QueueScreen: React.FC = () => {
   );
 };
 
+// Выезд заводит тот, кто грузит. Одно поле: куда едем. Код проекта,
+// комплект и всё остальное система придумывает сама.
+const NewTripScreen: React.FC = () => {
+  const [title, setTitle] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      const kit = await createTrip(title.trim());
+      go(`/kit/${kit.id}`);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Не получилось создать выезд');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={create} className="flex flex-col gap-4">
+      <div>
+        <h1 className="text-lg font-bold">Новый выезд</h1>
+        <p className="mt-1 text-sm text-[var(--muted)]">
+          Напишите, что за мероприятие. Список оборудования соберётся сам, пока вы грузите.
+        </p>
+      </div>
+      <input
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        placeholder="Свадьба в Лофте, 12 сентября"
+        className="min-h-[52px] rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 text-base text-[var(--text)]"
+      />
+      {error && <Notice text={error} tone="error" />}
+      <button
+        type="submit"
+        disabled={busy || title.trim().length < 3}
+        className="min-h-[52px] rounded-2xl bg-[var(--acc)] text-base font-semibold text-white disabled:opacity-50"
+      >
+        {busy ? 'Создаём…' : 'Создать и грузить'}
+      </button>
+    </form>
+  );
+};
+
 const SEVERITY_LABEL: Record<string, string> = {
   low: 'мелочь',
   high: 'серьёзно',
@@ -613,6 +665,9 @@ const HomeScreen: React.FC = () => {
         ))}
       </section>
 
+      <Button tone="accent" onClick={() => go('/trip')}>
+        Новый выезд
+      </Button>
       <div className="flex gap-2">
         <Button onClick={() => go('/stock')}>Весь склад</Button>
         <Button onClick={() => go('/defects')}>Дефекты</Button>
@@ -682,6 +737,78 @@ const StockScreen: React.FC = () => {
   );
 };
 
+// Человек стоит с железкой в руках и сканирует наклейку, которой нет в базе.
+// Это лучший момент, чтобы её завести, — и единственный, когда это точно сделают.
+const UnknownCodeScreen: React.FC<{ code: string; onCreated: () => void }> = ({
+  code,
+  onCreated
+}) => {
+  const [name, setName] = useState('');
+  const [category, setCategory] = useState('');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+
+  const create = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setBusy(true);
+    setError('');
+    try {
+      await createEquipment({ code, name: name.trim(), category: category.trim() || 'Разное' });
+      onCreated();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Не получилось завести');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <form onSubmit={create} className="flex flex-col gap-4">
+      <div>
+        <h1 className="text-lg font-bold">Такого кода ещё нет</h1>
+        <p className="mt-1 text-sm text-[var(--muted)]">
+          Наклейка <span className="font-mono">{code}</span> не привязана. Заведите единицу прямо
+          сейчас — потом никто этого не сделает.
+        </p>
+      </div>
+      <label className="flex flex-col gap-1 text-sm text-[var(--muted)]">
+        Что это
+        <input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="LED-кабинет P3.9 №117"
+          className="min-h-[52px] rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 text-base text-[var(--text)]"
+        />
+      </label>
+      <label className="flex flex-col gap-1 text-sm text-[var(--muted)]">
+        Категория
+        <input
+          value={category}
+          onChange={(e) => setCategory(e.target.value)}
+          list="equipment-categories"
+          placeholder="LED, Свет, Звук, Камеры…"
+          className="min-h-[52px] rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 text-base text-[var(--text)]"
+        />
+        <datalist id="equipment-categories">
+          {['LED', 'Свет', 'Звук', 'Камеры', 'Трансляции', 'Питание', 'Риггинг', 'Разное'].map(
+            (c) => (
+              <option key={c} value={c} />
+            )
+          )}
+        </datalist>
+      </label>
+      {error && <Notice text={error} tone="error" />}
+      <button
+        type="submit"
+        disabled={busy || name.trim().length < 2}
+        className="min-h-[52px] rounded-2xl bg-[var(--acc)] text-base font-semibold text-white disabled:opacity-50"
+      >
+        {busy ? 'Заводим…' : 'Завести'}
+      </button>
+    </form>
+  );
+};
+
 const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
   const [item, setItem] = useState<Equipment | null>(null);
   const [history, setHistory] = useState<HistoryEvent[]>([]);
@@ -694,6 +821,7 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
   const [severity, setSeverity] = useState<'low' | 'high' | 'blocker'>('high');
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [attached, setAttached] = useState<{ dataUrl: string; bytes: number } | null>(null);
+  const [unknown, setUnknown] = useState(false);
 
   const load = useCallback(async () => {
     setError('');
@@ -705,6 +833,11 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
       setHistory(events.data);
       setPhotos(await loadPhotos(found.data.id));
     } catch (err) {
+      // Кода нет в базе — предлагаем завести, а не показываем ошибку.
+      if (err instanceof ApiError && err.status === 404) {
+        setUnknown(true);
+        return;
+      }
       setError(err instanceof ApiError ? err.message : 'Не удалось загрузить карточку');
     }
   }, [code]);
@@ -728,6 +861,17 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
     }
   };
 
+  if (unknown && !item) {
+    return (
+      <UnknownCodeScreen
+        code={code}
+        onCreated={() => {
+          setUnknown(false);
+          void load();
+        }}
+      />
+    );
+  }
   if (error && !item) return <Notice text={error} tone="error" />;
   if (!item) return <p className="text-sm text-[var(--muted)]">Загружаем…</p>;
 
@@ -989,6 +1133,7 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
   const [done, setDone] = useState('');
   const [busy, setBusy] = useState(false);
   const [returning, setReturning] = useState<string | null>(null);
+  const [scanCode, setScanCode] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -1061,6 +1206,38 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
 
       {done && <Notice text={done} tone="ok" />}
       {error && <Notice text={error} tone="error" />}
+
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const code = scanCode.trim().toUpperCase();
+          if (!code) return;
+          void act(async () => {
+            const result = await checkoutByCode(kit.id, code);
+            setScanCode('');
+            return result;
+          }, `${code}: погружено`);
+        }}
+      >
+        <input
+          value={scanCode}
+          onChange={(e) => setScanCode(e.target.value)}
+          placeholder="Код с наклейки"
+          autoCapitalize="characters"
+          className="min-h-[52px] flex-1 rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 font-mono text-base uppercase text-[var(--text)]"
+        />
+        <button
+          type="submit"
+          disabled={busy}
+          className="min-h-[52px] rounded-2xl bg-[var(--acc)] px-5 font-semibold text-white disabled:opacity-50"
+        >
+          Погрузить
+        </button>
+      </form>
+      <p className="-mt-2 px-1 text-xs text-[var(--muted2)]">
+        Сканируйте всё, что кладёте в машину. Позиции, которой нет в списке, добавятся сами.
+      </p>
 
       <div className="flex flex-col gap-2">
         {kit.items.map((item) => (
@@ -1231,6 +1408,7 @@ export const FieldApp: React.FC = () => {
       {route.name === 'home' && <HomeScreen />}
       {route.name === 'stock' && <StockScreen />}
       {route.name === 'defects' && <DefectsScreen user={user} />}
+      {route.name === 'trip' && <NewTripScreen />}
       {route.name === 'queue' && <QueueScreen />}
       {route.name === 'equipment' && <EquipmentScreen code={route.code} />}
       {route.name === 'kit' && <KitScreen id={route.id} />}
