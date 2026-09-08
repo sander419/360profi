@@ -6,23 +6,37 @@
 // очередь с досылкой (src/api/offline.ts).
 
 import React, { useCallback, useEffect, useState } from 'react';
-import { ApiError, api, apiConfigured, clearSession, getStoredUser, getToken } from '../api/client.ts';
-import type { Equipment, HistoryEvent, Kit, SessionUser } from '../api/client.ts';
 import {
+  API_URL,
+  ApiError,
+  api,
+  apiConfigured,
+  clearSession,
+  getStoredUser,
+  getToken
+} from '../api/client.ts';
+import type { Defect, Equipment, HistoryEvent, Kit, Photo, SessionUser } from '../api/client.ts';
+import {
+  changeDefectStatus,
   dropFailed,
+  loadDefects,
   loadEquipmentByCode,
   loadEquipmentList,
   loadHistory,
   loadKit,
   loadKits,
+  loadPhotos,
+  newDefectId,
   optimistic,
   outbox,
   perform,
   retryFailed,
   startAutoSync,
   subscribeQueue,
-  syncNow
+  syncNow,
+  uploadPhoto
 } from '../api/offline.ts';
+import { preparePhoto } from './photo.ts';
 import type { OutboxEntry } from '../api/outbox.ts';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -79,6 +93,7 @@ type Route =
   | { name: 'equipment'; code: string }
   | { name: 'kit'; id: string }
   | { name: 'stock' }
+  | { name: 'defects' }
   | { name: 'queue' };
 
 const parseHash = (): Route => {
@@ -87,6 +102,7 @@ const parseHash = (): Route => {
   if (section === 'eq' && value) return { name: 'equipment', code: decodeURIComponent(value) };
   if (section === 'kit' && value) return { name: 'kit', id: value };
   if (section === 'stock') return { name: 'stock' };
+  if (section === 'defects') return { name: 'defects' };
   if (section === 'queue') return { name: 'queue' };
   return { name: 'home' };
 };
@@ -380,6 +396,142 @@ const QueueScreen: React.FC = () => {
   );
 };
 
+const SEVERITY_LABEL: Record<string, string> = {
+  low: 'мелочь',
+  high: 'серьёзно',
+  blocker: 'не работает'
+};
+
+const DEFECT_STATUS: Record<string, string> = {
+  open: 'Открыт',
+  in_repair: 'В ремонте',
+  closed: 'Закрыт'
+};
+
+const DefectsScreen: React.FC<{ user: SessionUser }> = ({ user }) => {
+  const [defects, setDefects] = useState<Defect[] | null>(null);
+  const [stale, setStale] = useState<{ savedAt: string | null } | null>(null);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState('');
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const result = await loadDefects();
+      setDefects(result.data);
+      setStale(result.stale ? { savedAt: result.savedAt } : null);
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Не удалось загрузить');
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const move = async (defect: Defect, status: 'in_repair' | 'closed') => {
+    setBusy(true);
+    setError('');
+    setDone('');
+    try {
+      const result = await changeDefectStatus(defect, status);
+      setDone(
+        `${defect.equipmentCode}: ${status === 'closed' ? 'дефект закрыт' : 'отправлен в ремонт'}${
+          result.queued ? `. ${QUEUED_HINT}` : ''
+        }`
+      );
+      await load();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : 'Не получилось');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <div>
+        <h1 className="text-lg font-bold">Дефекты</h1>
+        <p className="mt-1 text-sm text-[var(--muted)]">
+          Всё, что отметили на складе и на площадке. Закрывает тот, кто починил.
+        </p>
+      </div>
+
+      {stale && <StaleBanner savedAt={stale.savedAt} />}
+      {done && <Notice text={done} tone="ok" />}
+      {error && <Notice text={error} tone="error" />}
+      {defects === null && !error && <p className="text-sm text-[var(--muted)]">Загружаем…</p>}
+      {defects?.length === 0 && <Notice text="Открытых дефектов нет" tone="ok" />}
+
+      <div className="flex flex-col gap-2">
+        {defects?.map((defect) => (
+          <article
+            key={defect.id}
+            className="flex flex-col gap-3 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4"
+          >
+            <div className="flex items-start justify-between gap-2">
+              <div className="min-w-0">
+                <button
+                  type="button"
+                  onClick={() => go(`/eq/${encodeURIComponent(defect.equipmentCode)}`)}
+                  className="text-left text-sm font-semibold underline decoration-[var(--border2)] underline-offset-4"
+                >
+                  {defect.equipmentName}
+                </button>
+                <p className="font-mono text-xs text-[var(--muted2)]">
+                  {defect.equipmentCode} · {DEFECT_STATUS[defect.status]}
+                </p>
+              </div>
+              <span
+                className="shrink-0 rounded-full px-2 py-1 text-xs font-semibold"
+                style={{
+                  background: defect.severity === 'low' ? 'var(--warn-dim)' : 'var(--bad-dim)',
+                  color: defect.severity === 'low' ? 'var(--warn)' : 'var(--bad)'
+                }}
+              >
+                {SEVERITY_LABEL[defect.severity]}
+              </span>
+            </div>
+
+            <p className="text-sm">{defect.description}</p>
+
+            {defect.photos.length > 0 && (
+              <div className="flex gap-2 overflow-x-auto">
+                {defect.photos.map((photo) => (
+                  <a key={photo.id} href={`${API_URL}${photo.url}`} target="_blank" rel="noreferrer">
+                    <img
+                      src={`${API_URL}${photo.url}`}
+                      alt="Снимок поломки"
+                      className="h-24 w-24 rounded-2xl border border-[var(--border)] object-cover"
+                    />
+                  </a>
+                ))}
+              </div>
+            )}
+
+            <p className="text-xs text-[var(--muted2)]">
+              {defect.reporter ?? 'неизвестно кто'} · {fmtDateTime(defect.createdAt)}
+            </p>
+
+            {defect.status !== 'closed' && (user.role === 'manager' || user.role === 'admin') && (
+              <div className="flex gap-2">
+                {defect.status === 'open' && (
+                  <Button disabled={busy} onClick={() => void move(defect, 'in_repair')}>
+                    В ремонт
+                  </Button>
+                )}
+                <Button tone="ok" disabled={busy} onClick={() => void move(defect, 'closed')}>
+                  Починено
+                </Button>
+              </div>
+            )}
+          </article>
+        ))}
+      </div>
+    </>
+  );
+};
+
 const HomeScreen: React.FC = () => {
   const [code, setCode] = useState('');
   const [kits, setKits] = useState<Kit[] | null>(null);
@@ -461,7 +613,10 @@ const HomeScreen: React.FC = () => {
         ))}
       </section>
 
-      <Button onClick={() => go('/stock')}>Весь склад</Button>
+      <div className="flex gap-2">
+        <Button onClick={() => go('/stock')}>Весь склад</Button>
+        <Button onClick={() => go('/defects')}>Дефекты</Button>
+      </div>
     </>
   );
 };
@@ -537,6 +692,8 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
   const [defectOpen, setDefectOpen] = useState(false);
   const [defectText, setDefectText] = useState('');
   const [severity, setSeverity] = useState<'low' | 'high' | 'blocker'>('high');
+  const [photos, setPhotos] = useState<Photo[]>([]);
+  const [attached, setAttached] = useState<{ dataUrl: string; bytes: number } | null>(null);
 
   const load = useCallback(async () => {
     setError('');
@@ -546,6 +703,7 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
       setStale(found.stale ? { savedAt: found.savedAt } : null);
       const events = await loadHistory(found.data.id);
       setHistory(events.data);
+      setPhotos(await loadPhotos(found.data.id));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : 'Не удалось загрузить карточку');
     }
@@ -671,20 +829,54 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
               placeholder="Опишите коротко: что, где, когда заметили"
               className="rounded-2xl border border-[var(--border)] bg-[var(--bg)] p-3 text-base text-[var(--text)]"
             />
+
+            <label className="flex min-h-[52px] cursor-pointer items-center justify-center gap-2 rounded-2xl border border-[var(--border)] bg-[var(--bg)] px-4 text-sm font-medium text-[var(--muted)]">
+              {attached ? `Снимок приложен · ${Math.round(attached.bytes / 1024)} КБ` : 'Сфотографировать поломку'}
+              <input
+                type="file"
+                accept="image/*"
+                capture="environment"
+                className="hidden"
+                onChange={async (e) => {
+                  const chosen = e.target.files?.[0];
+                  e.target.value = '';
+                  if (!chosen) return;
+                  try {
+                    setAttached(await preparePhoto(chosen));
+                  } catch (err) {
+                    setError(err instanceof Error ? err.message : 'Снимок не подошёл');
+                  }
+                }}
+              />
+            </label>
+            {attached && (
+              <img
+                src={attached.dataUrl}
+                alt="Приложенный снимок"
+                className="max-h-56 rounded-2xl border border-[var(--border)] object-contain"
+              />
+            )}
             <div className="flex gap-2">
               <Button
                 tone="danger"
                 disabled={busy || defectText.trim().length < 3}
                 onClick={() =>
                   act(async () => {
+                    // Идентификатор придумываем здесь: снимок уходит следующим в
+                    // очереди и ссылается на дефект, которого на сервере ещё нет.
+                    const defectId = newDefectId();
                     const result = await perform({
                       path: `/api/v1/equipment/${item.id}/defects`,
-                      body: { severity, description: defectText.trim() },
+                      body: { id: defectId, severity, description: defectText.trim() },
                       label: `${item.code} · дефект`,
                       apply: optimistic.defect(item.id, item.openDefects)
                     });
+                    if (attached) {
+                      await uploadPhoto(item.id, item.code, attached.dataUrl, defectId);
+                    }
                     setDefectOpen(false);
                     setDefectText('');
+                    setAttached(null);
                     return result;
                   }, 'Дефект записан')
                 }
@@ -734,6 +926,25 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
           </Button>
         )}
       </div>
+
+      {photos.length > 0 && (
+        <section className="flex flex-col gap-2">
+          <h2 className="px-1 text-sm font-semibold uppercase tracking-wide text-[var(--muted2)]">
+            Снимки
+          </h2>
+          <div className="flex gap-2 overflow-x-auto pb-1">
+            {photos.map((photo) => (
+              <a key={photo.id} href={`${API_URL}${photo.url}`} target="_blank" rel="noreferrer">
+                <img
+                  src={`${API_URL}${photo.url}`}
+                  alt="Снимок оборудования"
+                  className="h-28 w-28 rounded-2xl border border-[var(--border)] object-cover"
+                />
+              </a>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section className="flex flex-col gap-2">
         <h2 className="px-1 text-sm font-semibold uppercase tracking-wide text-[var(--muted2)]">
@@ -1019,6 +1230,7 @@ export const FieldApp: React.FC = () => {
     <Shell user={user} onLogout={logout}>
       {route.name === 'home' && <HomeScreen />}
       {route.name === 'stock' && <StockScreen />}
+      {route.name === 'defects' && <DefectsScreen user={user} />}
       {route.name === 'queue' && <QueueScreen />}
       {route.name === 'equipment' && <EquipmentScreen code={route.code} />}
       {route.name === 'kit' && <KitScreen id={route.id} />}

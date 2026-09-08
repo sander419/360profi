@@ -1,4 +1,5 @@
 import type { FastifyInstance } from 'fastify';
+import { nowIso } from '../db.ts';
 import {
   clearAttempts,
   issueToken,
@@ -54,9 +55,14 @@ export const authRoutes = async (app: FastifyInstance): Promise<void> => {
 
       clearAttempts(phone);
       const session = { id: user.id, name: user.name, role: user.role };
-      return { token: issueToken(session, secret), user: session };
+      // Время сервера: телефон по нему поправит свои часы, иначе отметки,
+      // сделанные без связи, лягут в журнал с чужим временем.
+      return { token: issueToken(session, secret), user: session, serverTime: nowIso() };
     }
   );
 
-  app.get('/me', { preHandler: app.guard([]) }, async (req) => ({ user: req.user }));
+  app.get('/me', { preHandler: app.guard([]) }, async (req) => ({
+    user: req.user,
+    serverTime: nowIso()
+  }));
 };

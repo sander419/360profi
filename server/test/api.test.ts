@@ -3,11 +3,15 @@ import assert from 'node:assert/strict';
 import { buildApp } from '../src/app.ts';
 import { openDb, uid, nowIso } from '../src/db.ts';
 import { hashPin } from '../src/auth.ts';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import type { FastifyInstance } from 'fastify';
 import type { DatabaseSync } from 'node:sqlite';
 
 let app: FastifyInstance;
 let db: DatabaseSync;
+let photoTempDir = '';
 
 const ids = {
   manager: uid(),
@@ -56,6 +60,9 @@ const call = (
 };
 
 before(async () => {
+  // Снимки в тестах пишутся во временный каталог, а не в рабочий data/.
+  photoTempDir = fs.mkdtempSync(path.join(os.tmpdir(), '360profi-photos-'));
+  process.env.PHOTO_DIR = photoTempDir;
   db = openDb(':memory:');
   seedFixtures(db);
   app = await buildApp({ db });
@@ -73,6 +80,7 @@ before(async () => {
 after(async () => {
   await app.close();
   db.close();
+  fs.rmSync(photoTempDir, { recursive: true, force: true });
 });
 
 describe('вход', () => {
@@ -338,6 +346,81 @@ describe('работа без связи', () => {
     const today = new Date();
     const expected = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
     assert.equal(res.json().item.lastCheckOn, expected);
+  });
+});
+
+describe('снимки поломок', () => {
+  // Однопиксельный PNG: содержимое неважно, важен путь через API и диск.
+  const pngBase64 =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==';
+  const defectId = uid();
+
+  test('дефект можно завести с идентификатором от клиента', async () => {
+    const res = await call('POST', `/api/v1/equipment/${ids.camera}/defects`, {
+      token: tokens.tech,
+      body: { id: defectId, severity: 'high', description: 'Трещина на объективе' }
+    });
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.json().id, defectId, 'сервер сохраняет id, придуманный телефоном');
+  });
+
+  test('повтор того же идентификатора отклоняется', async () => {
+    const res = await call('POST', `/api/v1/equipment/${ids.camera}/defects`, {
+      token: tokens.tech,
+      body: { id: defectId, severity: 'high', description: 'Трещина на объективе' }
+    });
+    assert.equal(res.statusCode, 409);
+  });
+
+  test('снимок загружается и виден в дефекте', async () => {
+    const upload = await call('POST', `/api/v1/equipment/${ids.camera}/photos`, {
+      token: tokens.tech,
+      body: { data: `data:image/png;base64,${pngBase64}`, defectId }
+    });
+    assert.equal(upload.statusCode, 201);
+    const { url } = upload.json().photo;
+    assert.match(url, /^\/api\/v1\/photos\/[0-9a-f-]+\?t=/);
+
+    const list = await call('GET', `/api/v1/equipment/${ids.camera}/photos`, {
+      token: tokens.tech
+    });
+    assert.equal(list.json().photos.length, 1);
+    assert.equal(list.json().photos[0].author, 'Сергей Техник');
+
+    const defects = await call('GET', '/api/v1/defects', { token: tokens.manager });
+    const withPhoto = defects.json().defects.find((d: { id: string }) => d.id === defectId);
+    assert.equal(withPhoto.photos.length, 1, 'снимок виден менеджеру в списке дефектов');
+  });
+
+  test('снимок отдаётся только по правильному токену', async () => {
+    const list = await call('GET', `/api/v1/equipment/${ids.camera}/photos`, {
+      token: tokens.tech
+    });
+    const url: string = list.json().photos[0].url;
+
+    const ok = await call('GET', url);
+    assert.equal(ok.statusCode, 200);
+    assert.equal(ok.headers['content-type'], 'image/png');
+
+    const wrong = await call('GET', `${url.split('?')[0]}?t=подделка`);
+    assert.equal(wrong.statusCode, 403);
+  });
+
+  test('чужой формат не принимается', async () => {
+    const res = await call('POST', `/api/v1/equipment/${ids.camera}/photos`, {
+      token: tokens.tech,
+      body: { data: 'data:application/pdf;base64,JVBERi0xLjQK' }
+    });
+    assert.equal(res.statusCode, 400);
+    assert.match(res.json().error, /формат/);
+  });
+
+  test('снимок к дефекту другой единицы отклоняется', async () => {
+    const res = await call('POST', `/api/v1/equipment/${ids.led}/photos`, {
+      token: tokens.tech,
+      body: { data: `data:image/png;base64,${pngBase64}`, defectId }
+    });
+    assert.equal(res.statusCode, 409);
   });
 });
 

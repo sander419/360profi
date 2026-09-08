@@ -302,6 +302,7 @@ export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
           type: 'object',
           required: ['severity', 'description'],
           properties: {
+            id: { type: 'string', pattern: '^[0-9a-fA-F-]{16,64}$' },
             severity: { type: 'string', enum: ['low', 'high', 'blocker'] },
             description: { type: 'string', minLength: 1, maxLength: 1000 },
             occurredAt: { type: 'string', maxLength: 40 }
@@ -312,11 +313,16 @@ export const equipmentRoutes = async (app: FastifyInstance): Promise<void> => {
     async (req, reply) => {
       const { id } = req.params as { id: string };
       const body = req.body as {
+        id?: string;
         severity: 'low' | 'high' | 'blocker';
         description: string;
         occurredAt?: string;
       };
+      if (body.id && db.prepare('SELECT 1 FROM defects WHERE id = ?').get(body.id)) {
+        throw new DomainError('Дефект с таким идентификатором уже заведён', 409);
+      }
       const defect = openDefect(db, {
+        id: body.id,
         equipmentId: id,
         severity: body.severity,
         description: body.description,

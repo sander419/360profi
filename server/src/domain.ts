@@ -184,6 +184,8 @@ export const markChecked = (
 export const openDefect = (
   db: DatabaseSync,
   params: {
+    /** Идентификатор с клиента: телефон придумывает его до отправки. */
+    id?: string;
     equipmentId: string;
     severity: 'low' | 'high' | 'blocker';
     description: string;
@@ -192,7 +194,7 @@ export const openDefect = (
   }
 ): { id: string } => {
   getEquipment(db, params.equipmentId);
-  const id = uid();
+  const id = params.id ?? uid();
   db.prepare(
     `INSERT INTO defects (id, equipment_id, severity, description, status, reported_by, created_at)
      VALUES (?, ?, ?, ?, 'open', ?, ?)`

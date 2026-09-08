@@ -14,6 +14,7 @@ import { authRoutes } from './routes/auth.ts';
 import { equipmentRoutes } from './routes/equipment.ts';
 import { kitRoutes } from './routes/kits.ts';
 import { catalogRoutes } from './routes/catalog.ts';
+import { photoRoutes } from './routes/photos.ts';
 
 export interface AppContext {
   db: DatabaseSync;
@@ -95,6 +96,7 @@ export const buildApp = async (options: BuildOptions = {}): Promise<FastifyInsta
   await app.register(equipmentRoutes, { prefix: '/api/v1/equipment' });
   await app.register(kitRoutes, { prefix: '/api/v1/kits' });
   await app.register(catalogRoutes, { prefix: '/api/v1' });
+  await app.register(photoRoutes, { prefix: '/api/v1' });
 
   return app;
 };

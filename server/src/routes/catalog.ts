@@ -130,9 +130,25 @@ export const catalogRoutes = async (app: FastifyInstance): Promise<void> => {
       )
       .all(...(status ? [status] : [])) as unknown as Record<string, unknown>[];
 
+    const ids = rows.map((d) => String(d.id));
+    const photos = new Map<string, { id: string; url: string }[]>();
+    if (ids.length > 0) {
+      const found = db
+        .prepare(
+          `SELECT id, defect_id, token FROM photos WHERE defect_id IN (${ids.map(() => '?').join(', ')})`
+        )
+        .all(...ids) as unknown as { id: string; defect_id: string; token: string }[];
+      for (const p of found) {
+        const list = photos.get(p.defect_id) ?? [];
+        list.push({ id: p.id, url: `/api/v1/photos/${p.id}?t=${p.token}` });
+        photos.set(p.defect_id, list);
+      }
+    }
+
     return {
       defects: rows.map((d) => ({
         id: d.id,
+        photos: photos.get(String(d.id)) ?? [],
         equipmentId: d.equipment_id,
         equipmentCode: d.equipment_code,
         equipmentName: d.equipment_name,

@@ -4,8 +4,8 @@
 // сети, обязана дойти до сервера ровно один раз, в том же порядке и с тем
 // временем, когда её сделали, — иначе журнал перестаёт быть доказательством.
 
-import { API_URL, ApiError, apiConfigured, clearSession, getToken } from './client.ts';
-import type { Equipment, HistoryEvent, Kit } from './client.ts';
+import { API_URL, ApiError, apiConfigured, clearSession, getToken, serverNow } from './client.ts';
+import type { Defect, Equipment, HistoryEvent, Kit, Photo } from './client.ts';
 import { Outbox } from './outbox.ts';
 import type { OutboxEntry, OutboxStorage, SendResult } from './outbox.ts';
 
@@ -36,10 +36,11 @@ export const outbox = new Outbox(localStorageAdapter(OUTBOX_KEY));
 interface CacheShape {
   equipment: Record<string, Equipment>;
   kits: Record<string, Kit>;
+  defects: Defect[];
   savedAt: string | null;
 }
 
-const emptyCache: CacheShape = { equipment: {}, kits: {}, savedAt: null };
+const emptyCache: CacheShape = { equipment: {}, kits: {}, defects: [], savedAt: null };
 
 const readCache = (): CacheShape => {
   try {
@@ -49,6 +50,7 @@ const readCache = (): CacheShape => {
     return {
       equipment: parsed.equipment ?? {},
       kits: parsed.kits ?? {},
+      defects: parsed.defects ?? [],
       savedAt: parsed.savedAt ?? null
     };
   } catch {
@@ -222,6 +224,31 @@ export const loadKit = async (id: string): Promise<Loaded<Kit>> => {
   }
 };
 
+export const loadDefects = async (): Promise<Loaded<Defect[]>> => {
+  try {
+    const { defects } = await get<{ defects: Defect[] }>('/api/v1/defects');
+    const cache = readCache();
+    cache.defects = defects;
+    writeCache(cache);
+    return fresh(defects);
+  } catch (err) {
+    if (!isOffline(err)) throw err;
+    const cache = readCache();
+    return { data: cache.defects, stale: true, savedAt: cache.savedAt };
+  }
+};
+
+export const loadPhotos = async (equipmentId: string): Promise<Photo[]> => {
+  try {
+    const { photos } = await get<{ photos: Photo[] }>(`/api/v1/equipment/${equipmentId}/photos`);
+    return photos;
+  } catch (err) {
+    // Снимки без связи не покажем: они лежат на сервере, а не в телефоне.
+    if (!isOffline(err)) throw err;
+    return [];
+  }
+};
+
 // --- запись через очередь ----------------------------------------------------
 
 const sendEntry = async (entry: OutboxEntry): Promise<Response> => {
@@ -273,6 +300,7 @@ export interface PerformResult {
 
 export interface PerformOptions {
   path: string;
+  method?: 'POST' | 'PATCH';
   body?: Record<string, unknown>;
   /** Человеческое описание для экрана очереди. */
   label: string;
@@ -291,10 +319,10 @@ const newId = (): string =>
  * пропажу связи — молча превращаем в отложенную отправку.
  */
 export const perform = async (options: PerformOptions): Promise<PerformResult> => {
-  const occurredAt = new Date().toISOString();
+  const occurredAt = serverNow().toISOString();
   const entry: OutboxEntry = {
     id: newId(),
-    method: 'POST',
+    method: options.method ?? 'POST',
     path: options.path,
     body: { ...(options.body ?? {}), occurredAt },
     label: options.label,
@@ -304,7 +332,18 @@ export const perform = async (options: PerformOptions): Promise<PerformResult> =
     state: 'pending'
   };
 
-  options.apply?.();
+  // localStorage — это несколько мегабайт на весь браузер. Снимок туда влезет,
+  // десяток снимков — уже нет, и тогда молча потерялись бы и обычные отметки.
+  const size = JSON.stringify(entry).length;
+  if (size > 200_000) {
+    const queued = JSON.stringify(outbox.list()).length;
+    if (queued + size > 3_500_000) {
+      throw new ApiError(
+        'В телефоне уже слишком много неотправленных снимков. Отправьте очередь при связи, потом снимайте дальше',
+        0
+      );
+    }
+  }
 
   if (typeof navigator !== 'undefined' && navigator.onLine === false) {
     outbox.add(entry, occurredAt);
@@ -326,7 +365,7 @@ export const perform = async (options: PerformOptions): Promise<PerformResult> =
 
 // Оптимистичные правки кеша под каждое действие.
 export const optimistic = {
-  check: (id: string, occurredAt = new Date()) => () =>
+  check: (id: string, occurredAt = serverNow()) => () =>
     patchEquipment(id, {
       lastCheckOn: `${occurredAt.getFullYear()}-${String(occurredAt.getMonth() + 1).padStart(2, '0')}-${String(occurredAt.getDate()).padStart(2, '0')}`
     }),
@@ -346,6 +385,40 @@ export const optimistic = {
     if (state !== 'missing') patchEquipment(equipmentId, { status });
   }
 };
+
+/** Идентификатор дефекта придумывает телефон: снимок должен уметь сослаться
+ * на дефект, который ещё лежит в очереди и на сервер не попал. */
+export const newDefectId = (): string => newId();
+
+export const changeDefectStatus = (
+  defect: Defect,
+  status: 'open' | 'in_repair' | 'closed'
+): Promise<PerformResult> => {
+  const words = { open: 'открыт', in_repair: 'в ремонте', closed: 'закрыт' };
+  return perform({
+    method: 'PATCH',
+    path: `/api/v1/defects/${defect.id}`,
+    body: { status },
+    label: `${defect.equipmentCode} · дефект ${words[status]}`,
+    apply: () => {
+      const cache = readCache();
+      cache.defects = cache.defects.map((d) => (d.id === defect.id ? { ...d, status } : d));
+      writeCache(cache);
+    }
+  });
+};
+
+export const uploadPhoto = (
+  equipmentId: string,
+  code: string,
+  dataUrl: string,
+  defectId?: string
+): Promise<PerformResult> =>
+  perform({
+    path: `/api/v1/equipment/${equipmentId}/photos`,
+    body: { data: dataUrl, defectId },
+    label: `${code} · снимок`
+  });
 
 // --- синхронизация -----------------------------------------------------------
 

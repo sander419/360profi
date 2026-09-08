@@ -8,6 +8,7 @@ export const apiConfigured = (): boolean => API_URL.length > 0;
 
 const TOKEN_KEY = 'profi360_token';
 const USER_KEY = 'profi360_user';
+const SKEW_KEY = 'profi360_clock_skew';
 
 export type Role = 'admin' | 'manager' | 'tech';
 
@@ -41,6 +42,28 @@ export interface HistoryEvent {
   userName: string | null;
   note: string;
   createdAt: string;
+}
+
+export interface Photo {
+  id: string;
+  url: string;
+  author?: string | null;
+  bytes?: number;
+  occurredAt?: string;
+}
+
+export interface Defect {
+  id: string;
+  equipmentId: string;
+  equipmentCode: string;
+  equipmentName: string;
+  severity: 'low' | 'high' | 'blocker';
+  description: string;
+  status: 'open' | 'in_repair' | 'closed';
+  reporter: string | null;
+  createdAt: string;
+  closedAt: string | null;
+  photos: Photo[];
 }
 
 export interface KitItem {
@@ -100,6 +123,31 @@ export const clearSession = (): void => {
   }
 };
 
+// Часы на телефоне сотрудника могут быть сбиты на часы и дни. Запоминаем
+// разницу с сервером и учитываем её во времени отметок, сделанных без связи.
+const rememberServerTime = (serverTime?: string): void => {
+  if (!serverTime) return;
+  const parsed = Date.parse(serverTime);
+  if (Number.isNaN(parsed)) return;
+  try {
+    localStorage.setItem(SKEW_KEY, String(parsed - Date.now()));
+  } catch {
+    // без хранилища просто останемся на часах телефона
+  }
+};
+
+export const clockSkewMs = (): number => {
+  try {
+    const raw = Number(localStorage.getItem(SKEW_KEY));
+    return Number.isFinite(raw) ? raw : 0;
+  } catch {
+    return 0;
+  }
+};
+
+/** Текущее время с поправкой на расхождение часов телефона и сервера. */
+export const serverNow = (): Date => new Date(Date.now() + clockSkewMs());
+
 export class ApiError extends Error {
   status: number;
   constructor(message: string, status: number) {
@@ -151,14 +199,18 @@ const request = async <T,>(
 // Здесь остаётся только то, что без связи невозможно в принципе.
 export const api = {
   login: async (phone: string, pin: string): Promise<SessionUser> => {
-    const data = await request<{ token: string; user: SessionUser }>('/api/v1/auth/login', {
-      method: 'POST',
-      body: { phone, pin },
-      auth: false
-    });
+    const data = await request<{ token: string; user: SessionUser; serverTime?: string }>(
+      '/api/v1/auth/login',
+      { method: 'POST', body: { phone, pin }, auth: false }
+    );
     storeSession(data.token, data.user);
+    rememberServerTime(data.serverTime);
     return data.user;
   },
 
-  me: () => request<{ user: SessionUser }>('/api/v1/auth/me').then((d) => d.user)
+  me: () =>
+    request<{ user: SessionUser; serverTime?: string }>('/api/v1/auth/me').then((d) => {
+      rememberServerTime(d.serverTime);
+      return d.user;
+    })
 };
