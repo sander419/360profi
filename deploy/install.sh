@@ -99,15 +99,19 @@ cp -r "$APP_DIR/dist/." "$WWW_DIR/"
 
 echo "==> Права"
 chown -R profi360:profi360 "$APP_DIR" "$DATA_DIR" /var/backups/360profi
-chmod +x "$APP_DIR/deploy/backup.sh"
+chmod +x "$APP_DIR/deploy/backup.sh" "$APP_DIR/deploy/watchdog.sh"
 
 echo "==> systemd"
 sed "s/^Environment=PORT=.*/Environment=PORT=$PORT/"   "$APP_DIR/deploy/360profi-api.service" > /etc/systemd/system/360profi-api.service
 cp "$APP_DIR/deploy/360profi-backup.service" /etc/systemd/system/
 cp "$APP_DIR/deploy/360profi-backup.timer" /etc/systemd/system/
+# Сторож: домен и порт подставляем в юнит, чтобы он проверял именно этот сайт.
+sed -e "s/^Environment=PORT=.*/Environment=PORT=$PORT/"     -e "s/^Environment=DOMAIN=.*/Environment=DOMAIN=$DOMAIN/"   "$APP_DIR/deploy/360profi-watchdog.service" > /etc/systemd/system/360profi-watchdog.service
+cp "$APP_DIR/deploy/360profi-watchdog.timer" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now 360profi-api.service
 systemctl enable --now 360profi-backup.timer
+systemctl enable --now 360profi-watchdog.timer
 systemctl restart 360profi-api.service
 
 echo "==> nginx"
@@ -159,5 +163,6 @@ cat <<EOF
 Порт API:  127.0.0.1:$PORT (наружу только через nginx)
 Логи:      journalctl -u 360profi-api -f
 Бэкапы:    systemctl list-timers 360profi-backup, файлы в /var/backups/360profi
+Сторож:    каждые 5 мин, journalctl -u 360profi-watchdog, состояние в $DATA_DIR/watchdog.json
 Обновление: sudo DOMAIN=$DOMAIN bash $APP_DIR/deploy/install.sh
 EOF

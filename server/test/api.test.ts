@@ -734,6 +734,30 @@ describe('снимки поломок', () => {
 });
 
 // Требования закона о персональных данных, проверяемые кодом, а не обещанием.
+describe('состояние системы', () => {
+  test('техник состояние сервера не смотрит, менеджер смотрит', async () => {
+    assert.equal((await call('GET', '/api/v1/status', { token: tokens.tech })).statusCode, 403);
+    assert.equal((await call('GET', '/api/v1/status', { token: tokens.manager })).statusCode, 200);
+  });
+
+  test('отдаёт цифры, по которым видно, живое ли всё', async () => {
+    const body = (await call('GET', '/api/v1/status', { token: tokens.manager })).json();
+
+    assert.ok(body.data.equipment > 0, 'считает оборудование');
+    assert.ok(body.data.users >= 2, 'считает активных сотрудников');
+    assert.ok(body.data.loginsLast7Days >= 1, 'считает входы за неделю');
+    assert.equal(typeof body.server.uptimeHours, 'number');
+  });
+
+  test('без сторожа честно говорит, что данных о проверках нет', async () => {
+    const body = (await call('GET', '/api/v1/status', { token: tokens.manager })).json();
+    // В тестах база в памяти, файла состояния нет — и это должно быть видно,
+    // а не выглядеть как «всё хорошо».
+    assert.equal(body.watchdog, null);
+    assert.equal(body.watchdogStale, true);
+  });
+});
+
 describe('персональные данные', () => {
   test('входы пишутся в журнал: и удачные, и нет', async () => {
     const before = (

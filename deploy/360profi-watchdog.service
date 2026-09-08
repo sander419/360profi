@@ -1,0 +1,15 @@
+[Unit]
+Description=Сторож 360PROFI: проверка живости и состояния
+After=360profi-api.service
+
+[Service]
+Type=oneshot
+# От root: сторожу нужно уметь перезапустить сервис, если тот не отвечает.
+User=root
+Environment=PORT=4000
+Environment=DATA_DIR=/var/lib/360profi
+Environment=BACKUP_DIR=/var/backups/360profi
+Environment=DOMAIN=360profi.hiborg-space.ru
+EnvironmentFile=-/etc/360profi.env
+ExecStart=/opt/360profi/deploy/watchdog.sh
+SyslogIdentifier=360profi-watchdog

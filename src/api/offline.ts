@@ -249,6 +249,31 @@ export const loadPhotos = async (equipmentId: string): Promise<Photo[]> => {
   }
 };
 
+export interface SystemStatus {
+  server: { uptimeHours: number; dbBytes: number; time: string };
+  data: {
+    equipment: number;
+    users: number;
+    openDefects: number;
+    photos: number;
+    trips: number;
+    loginsLast7Days: number;
+  };
+  watchdog: {
+    checkedAt: string;
+    status: 'ok' | 'problem';
+    apiMs: number;
+    diskUsedPercent: number;
+    backupAgeHours: number;
+    certDaysLeft: number;
+    problems: string[];
+  } | null;
+  watchdogStale: boolean;
+}
+
+/** Состояние системы: живо ли всё, свежий ли бэкап, не кончается ли сертификат. */
+export const loadSystemStatus = (): Promise<SystemStatus> => get<SystemStatus>('/api/v1/status');
+
 /** Сводка считается на сервере: она должна быть одинаковой в приложении и в чате. */
 export const loadTripSummary = async (
   kitId: string

@@ -37,6 +37,7 @@ import {
   loadKit,
   loadKits,
   loadPhotos,
+  loadSystemStatus,
   loadTripSummary,
   newDefectId,
   receiveRest,
@@ -53,6 +54,7 @@ import {
 } from '../api/offline.ts';
 import { preparePhoto } from './photo.ts';
 import type { OutboxEntry } from '../api/outbox.ts';
+import type { SystemStatus } from '../api/offline.ts';
 
 const STATUS_LABEL: Record<string, string> = {
   stock: 'На складе',
@@ -110,6 +112,7 @@ type Route =
   | { name: 'stock' }
   | { name: 'defects' }
   | { name: 'trip' }
+  | { name: 'status' }
   | { name: 'queue' };
 
 const parseHash = (): Route => {
@@ -120,6 +123,7 @@ const parseHash = (): Route => {
   if (section === 'stock') return { name: 'stock' };
   if (section === 'defects') return { name: 'defects' };
   if (section === 'trip') return { name: 'trip' };
+  if (section === 'status') return { name: 'status' };
   if (section === 'queue') return { name: 'queue' };
   return { name: 'home' };
 };
@@ -462,6 +466,89 @@ const NewTripScreen: React.FC = () => {
   );
 };
 
+// Состояние системы для того, кто за неё отвечает: проверить с телефона,
+// а не идти по ssh. Показываем то, по чему видно беду: сторож молчит, бэкап
+// старый, диск кончается, сертификат истекает.
+const StatusScreen: React.FC = () => {
+  const [state, setState] = useState<SystemStatus | null>(null);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    loadSystemStatus()
+      .then(setState)
+      .catch((err) => setError(err instanceof ApiError ? err.message : 'Не удалось загрузить'));
+  }, []);
+
+  if (error) return <Notice text={error} tone="error" />;
+  if (!state) return <p className="text-sm text-[var(--muted)]">Проверяем…</p>;
+
+  const w = state.watchdog;
+  const bad = state.watchdogStale || w?.status === 'problem';
+
+  const rows: [string, string][] = [
+    ['Оборудование', `${state.data.equipment}`],
+    ['Сотрудники', `${state.data.users}`],
+    ['Открытые дефекты', `${state.data.openDefects}`],
+    ['Выезды', `${state.data.trips}`],
+    ['Снимки', `${state.data.photos}`],
+    ['Входов за неделю', `${state.data.loginsLast7Days}`],
+    ['Сервер работает', `${state.server.uptimeHours} ч`],
+    ['Размер базы', `${Math.max(1, Math.round(state.server.dbBytes / 1024))} КБ`]
+  ];
+
+  if (w) {
+    rows.push(
+      ['Ответ сервера', `${w.apiMs} мс`],
+      ['Занято на диске', `${w.diskUsedPercent}%`],
+      [
+        'Последний бэкап',
+        w.backupAgeHours < 0 ? 'нет' : `${w.backupAgeHours} ч назад`
+      ],
+      ['Сертификат', w.certDaysLeft < 0 ? 'неизвестно' : `${w.certDaysLeft} дн`]
+    );
+  }
+
+  return (
+    <>
+      <h1 className="text-lg font-bold">Состояние системы</h1>
+
+      {state.watchdogStale ? (
+        <Notice
+          tone="error"
+          text={
+            w
+              ? `Сторож молчит с ${fmtDateTime(w.checkedAt)} — проверки не идут, состояние неизвестно`
+              : 'Сторож не настроен: проверки живости не выполняются'
+          }
+        />
+      ) : w?.status === 'problem' ? (
+        <Notice tone="error" text={`Сторож нашёл проблемы: ${w.problems.join('; ')}`} />
+      ) : (
+        <Notice tone="ok" text={`Всё в порядке, проверено ${fmtDateTime(w!.checkedAt)}`} />
+      )}
+
+      <dl className="grid gap-2 sm:grid-cols-2">
+        {rows.map(([label, value]) => (
+          <div
+            key={label}
+            className="flex items-baseline justify-between gap-3 rounded-2xl border border-[var(--border)] bg-[var(--surface)] px-4 py-3"
+          >
+            <dt className="text-sm text-[var(--muted)]">{label}</dt>
+            <dd className="font-mono text-sm font-semibold">{value}</dd>
+          </div>
+        ))}
+      </dl>
+
+      {!bad && (
+        <p className="px-1 text-xs text-[var(--muted2)]">
+          Сторож проверяет систему каждые пять минут и сам перезапускает сервис, если тот
+          перестал отвечать.
+        </p>
+      )}
+    </>
+  );
+};
+
 const SEVERITY_LABEL: Record<string, string> = {
   low: 'мелочь',
   high: 'серьёзно',
@@ -598,7 +685,7 @@ const DefectsScreen: React.FC<{ user: SessionUser }> = ({ user }) => {
   );
 };
 
-const HomeScreen: React.FC = () => {
+const HomeScreen: React.FC<{ user: SessionUser }> = ({ user }) => {
   const [code, setCode] = useState('');
   const [kits, setKits] = useState<Kit[] | null>(null);
   const [stale, setStale] = useState<{ savedAt: string | null } | null>(null);
@@ -686,6 +773,9 @@ const HomeScreen: React.FC = () => {
         <Button onClick={() => go('/stock')}>Весь склад</Button>
         <Button onClick={() => go('/defects')}>Дефекты</Button>
       </div>
+      {(user.role === 'admin' || user.role === 'manager') && (
+        <Button onClick={() => go('/status')}>Состояние системы</Button>
+      )}
     </>
   );
 };
@@ -1562,10 +1652,11 @@ export const FieldApp: React.FC = () => {
 
   return (
     <Shell user={user} onLogout={logout}>
-      {route.name === 'home' && <HomeScreen />}
+      {route.name === 'home' && <HomeScreen user={user} />}
       {route.name === 'stock' && <StockScreen />}
       {route.name === 'defects' && <DefectsScreen user={user} />}
       {route.name === 'trip' && <NewTripScreen />}
+      {route.name === 'status' && <StatusScreen />}
       {route.name === 'queue' && <QueueScreen />}
       {route.name === 'equipment' && <EquipmentScreen code={route.code} />}
       {route.name === 'kit' && <KitScreen id={route.id} />}
