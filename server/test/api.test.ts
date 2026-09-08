@@ -733,6 +733,52 @@ describe('снимки поломок', () => {
   });
 });
 
+// Требования закона о персональных данных, проверяемые кодом, а не обещанием.
+describe('персональные данные', () => {
+  test('входы пишутся в журнал: и удачные, и нет', async () => {
+    const before = (
+      db.prepare('SELECT COUNT(*) AS c FROM access_log').get() as unknown as { c: number }
+    ).c;
+
+    await call('POST', '/api/v1/auth/login', {
+      body: { phone: '+70000000002', pin: '654321' }
+    });
+    await call('POST', '/api/v1/auth/login', {
+      body: { phone: '+70000000002', pin: '000000' }
+    });
+
+    const rows = db
+      .prepare('SELECT success, user_id FROM access_log ORDER BY rowid DESC LIMIT 2')
+      .all() as unknown as { success: number; user_id: string | null }[];
+    const after = (
+      db.prepare('SELECT COUNT(*) AS c FROM access_log').get() as unknown as { c: number }
+    ).c;
+
+    assert.equal(after - before, 2);
+    assert.deepEqual(
+      rows.map((r) => r.success).sort(),
+      [0, 1],
+      'записан и отказ, и успешный вход'
+    );
+    assert.ok(rows.every((r) => r.user_id === ids.tech));
+  });
+
+  test('журнал не хранит ничего лишнего', () => {
+    const columns = (
+      db.prepare('PRAGMA table_info(access_log)').all() as unknown as { name: string }[]
+    ).map((c) => c.name);
+    assert.deepEqual(columns.sort(), [
+      'created_at',
+      'id',
+      'ip',
+      'phone',
+      'success',
+      'user_agent',
+      'user_id'
+    ]);
+  });
+});
+
 describe('служебное', () => {
   test('health отвечает без токена', async () => {
     const res = await call('GET', '/api/v1/health');

@@ -1,5 +1,5 @@
 import type { FastifyInstance } from 'fastify';
-import { nowIso } from '../db.ts';
+import { nowIso, uid } from '../db.ts';
 import {
   clearAttempts,
   issueToken,
@@ -20,6 +20,29 @@ interface UserRow {
 
 export const authRoutes = async (app: FastifyInstance): Promise<void> => {
   const { db, secret } = app.ctx;
+
+  // Пишем и удачные, и неудачные входы: по вторым видно подбор PIN, по первым —
+  // кто работал под учёткой. Больше ничего не собираем: ни геолокации, ни истории.
+  const logAccess = (params: {
+    userId: string | null;
+    phone: string;
+    success: boolean;
+    ip: string;
+    userAgent: string;
+  }): void => {
+    db.prepare(
+      `INSERT INTO access_log (id, user_id, phone, success, ip, user_agent, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      uid(),
+      params.userId,
+      params.phone.slice(0, 32),
+      params.success ? 1 : 0,
+      params.ip.slice(0, 64),
+      params.userAgent.slice(0, 200),
+      nowIso()
+    );
+  };
 
   app.post(
     '/login',
@@ -48,12 +71,17 @@ export const authRoutes = async (app: FastifyInstance): Promise<void> => {
 
       // Ответ одинаковый для «нет такого телефона» и «неверный PIN»:
       // иначе форма входа превращается в справочник сотрудников.
+      const ip = String(req.headers['x-real-ip'] ?? req.ip ?? '');
+      const agent = String(req.headers['user-agent'] ?? '');
+
       if (!user || !user.active || !verifyPin(pin, user.pin_hash)) {
         noteFailedAttempt(phone);
+        logAccess({ userId: user?.id ?? null, phone, success: false, ip, userAgent: agent });
         return reply.code(401).send({ error: 'Неверный телефон или PIN' });
       }
 
       clearAttempts(phone);
+      logAccess({ userId: user.id, phone, success: true, ip, userAgent: agent });
       const session = { id: user.id, name: user.name, role: user.role };
       // Время сервера: телефон по нему поправит свои часы, иначе отметки,
       // сделанные без связи, лягут в журнал с чужим временем.

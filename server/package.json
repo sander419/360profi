@@ -14,7 +14,8 @@
     "test": "node --test \"test/*.test.ts\"",
     "typecheck": "tsc --noEmit",
     "import-users": "node src/import-users.ts",
-    "labels": "node src/labels.ts"
+    "labels": "node src/labels.ts",
+    "privacy": "node src/privacy.ts"
   },
   "dependencies": {
     "@fastify/cors": "^10.0.2",
