@@ -21,13 +21,28 @@ problems=()
 now_iso="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
 # --- API отвечает? -----------------------------------------------------------
+# Три попытки с паузой: сервис могли только что перезапустить, и одна неудачная
+# проверка не повод дёргать systemctl. Сторож, дёргающий сервис по любому
+# всплеску, вреднее его отсутствия.
+check_api() {
+  local start_ns
+  start_ns=$(date +%s%N)
+  if curl -fsS --max-time 8 "http://127.0.0.1:$PORT/api/v1/health" >/dev/null 2>&1; then
+    api_ms=$(( ($(date +%s%N) - start_ns) / 1000000 ))
+    return 0
+  fi
+  return 1
+}
+
 api_ok=false
 api_ms=0
-start_ns=$(date +%s%N)
-if curl -fsS --max-time 8 "http://127.0.0.1:$PORT/api/v1/health" >/dev/null 2>&1; then
-  api_ok=true
-  api_ms=$(( ($(date +%s%N) - start_ns) / 1000000 ))
-fi
+for attempt in 1 2 3; do
+  if check_api; then
+    api_ok=true
+    break
+  fi
+  (( attempt < 3 )) && sleep 3
+done
 
 service_state="$(systemctl is-active 360profi-api 2>/dev/null || echo unknown)"
 
@@ -42,7 +57,7 @@ if [[ "$api_ok" == false ]]; then
     date +%s > "$RESTART_STAMP"
     restarted=true
     sleep 5
-    if curl -fsS --max-time 8 "http://127.0.0.1:$PORT/api/v1/health" >/dev/null 2>&1; then
+    if check_api; then
       api_ok=true
       problems+=("перезапустил сервис — поднялся")
     else
@@ -69,8 +84,13 @@ if [[ -n "$newest_backup" ]]; then
   if (( backup_age_h > 30 )); then
     problems+=("последний бэкап $backup_age_h ч назад")
   fi
-else
-  problems+=("бэкапов нет вообще")
+elif [[ -f "$DATA_DIR/360profi.db" ]]; then
+  # На свежей установке бэкапа ещё не было и быть не могло: таймер суточный.
+  # Ругаемся, только если система живёт дольше, чем интервал бэкапа.
+  db_age_h=$(( ( $(date +%s) - $(stat -c %Y "$DATA_DIR/360profi.db") ) / 3600 ))
+  if (( db_age_h > 30 )); then
+    problems+=("бэкапов нет, хотя система работает $db_age_h ч")
+  fi
 fi
 
 # --- Срок сертификата --------------------------------------------------------
