@@ -78,6 +78,7 @@ PIN хранится только как scrypt-хеш; после 10 неуда
 | GET | `/equipment/:id/photos` | вход | снимки по единице |
 | GET | `/photos/:id?t=<токен>` | по токену | сам файл снимка |
 | POST | `/auth/login` | все | вход; каждая попытка пишется в `access_log` |
+| GET | `/status` | manager | состояние системы: цифры сервера и проверки сторожа |
 | GET | `/defects` | вход | открытые дефекты (или `?status=`) |
 | PATCH | `/defects/:id` | вход | `open` / `in_repair` / `closed` |
 | GET | `/projects`, POST `/projects` | вход | проекты (код придумается сам: `P-2609-1`) |
