@@ -489,6 +489,111 @@ describe('работа без связи', () => {
   });
 });
 
+// Сводка — единственная бумажка, которую в такой компании увидит руководитель.
+describe('сводка выезда', () => {
+  const sent: string[] = [];
+  let kitId = '';
+
+  before(async () => {
+    setNotifier((event) => {
+      if (event.kind === 'summary') sent.push(event.text);
+    });
+
+    const project = (
+      await call('POST', '/api/v1/projects', {
+        token: tokens.tech,
+        body: { title: 'Корпоратив в Атриуме' }
+      })
+    ).json().project;
+
+    const made: string[] = [];
+    for (const [code, name] of [
+      ['SUM-1', 'Экран 3х2'],
+      ['SUM-2', 'Комплект света'],
+      ['SUM-3', 'Радиомикрофон']
+    ]) {
+      const res = await call('POST', '/api/v1/equipment', {
+        token: tokens.tech,
+        body: { code, name, category: 'Разное' }
+      });
+      made.push(res.json().item.id);
+    }
+
+    kitId = (
+      await call('POST', '/api/v1/kits', {
+        token: tokens.tech,
+        body: { projectId: project.id, name: 'Корпоратив в Атриуме' }
+      })
+    ).json().kit.id;
+
+    for (const equipmentId of made) {
+      await call('POST', `/api/v1/kits/${kitId}/checkout`, {
+        token: tokens.tech,
+        body: { equipmentId }
+      });
+    }
+
+    await call('POST', `/api/v1/kits/${kitId}/checkin`, {
+      token: tokens.manager,
+      body: { equipmentId: made[1], returnState: 'damaged', note: 'сгорел блок питания' }
+    });
+    await call('POST', `/api/v1/kits/${kitId}/checkin`, {
+      token: tokens.manager,
+      body: { equipmentId: made[2], returnState: 'missing', note: 'не нашли на площадке' }
+    });
+  });
+
+  after(() => resetNotifier());
+
+  test('считает уехавшее, вернувшееся и незакрытое', async () => {
+    const res = await call('GET', `/api/v1/kits/${kitId}/summary`, { token: tokens.tech });
+    assert.equal(res.statusCode, 200);
+    const { counts } = res.json().summary;
+    assert.deepEqual(counts, {
+      planned: 3,
+      taken: 3,
+      returnedOk: 0,
+      damaged: 1,
+      missing: 1,
+      pending: 1
+    });
+  });
+
+  test('текст читается человеком и называет проблемные позиции', async () => {
+    const { text } = (
+      await call('GET', `/api/v1/kits/${kitId}/summary`, { token: tokens.tech })
+    ).json().summary;
+
+    assert.match(text, /Выезд «Корпоратив в Атриуме»/);
+    assert.match(text, /Уехало: 3/);
+    assert.match(text, /В ремонт: 1\n {2}SUM-2 Комплект света — сгорел блок питания/);
+    assert.match(text, /Не вернулось: 1\n {2}SUM-3 Радиомикрофон/);
+    assert.match(text, /Ещё не принято: 1\n {2}SUM-1 Экран 3х2/);
+    assert.match(text, /Отмечали: .*Сергей Техник/);
+    assert.match(text, /Поломки за выезд: 2/, 'повреждение и пропажа завели дефекты');
+  });
+
+  test('сводку можно отправить в чат одной кнопкой', async () => {
+    sent.length = 0;
+    const res = await call('POST', `/api/v1/kits/${kitId}/summary/send`, {
+      token: tokens.tech,
+      body: {}
+    });
+    assert.equal(res.statusCode, 200);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0]!, /Корпоратив в Атриуме/);
+  });
+
+  test('после приёма остатка незакрытых не остаётся', async () => {
+    await call('POST', `/api/v1/kits/${kitId}/checkin-rest`, { token: tokens.tech, body: {} });
+    const { counts } = (
+      await call('GET', `/api/v1/kits/${kitId}/summary`, { token: tokens.tech })
+    ).json().summary;
+    assert.equal(counts.pending, 0);
+    assert.equal(counts.returnedOk, 1);
+  });
+});
+
 describe('оповещения', () => {
   const sent: { kind: string; text: string; code?: string }[] = [];
 

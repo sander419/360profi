@@ -66,6 +66,27 @@ export interface Defect {
   photos: Photo[];
 }
 
+export interface TripSummary {
+  kitId: string;
+  kitName: string;
+  projectCode: string | null;
+  counts: {
+    planned: number;
+    taken: number;
+    returnedOk: number;
+    damaged: number;
+    missing: number;
+    pending: number;
+  };
+  damaged: { code: string; name: string; note: string }[];
+  missing: { code: string; name: string; note: string }[];
+  pending: { code: string; name: string; note: string }[];
+  defects: { code: string; name: string; severity: string; description: string }[];
+  people: string[];
+  /** Готовый текст для чата: одна формулировка для приложения и оповещения. */
+  text: string;
+}
+
 export interface KitItem {
   equipmentId: string;
   code: string;

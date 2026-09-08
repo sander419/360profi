@@ -8,7 +8,7 @@
 //   WEBHOOK_URL — POST {text, type, code, url} куда угодно.
 // Не задано ничего — оповещения просто выключены, сервер работает как раньше.
 
-export type NotifyKind = 'defect' | 'missing';
+export type NotifyKind = 'defect' | 'missing' | 'summary';
 
 export interface NotifyEvent {
   kind: NotifyKind;
@@ -54,6 +54,10 @@ const httpSender: Sender = async (event) => {
     // Молча: недоступный мессенджер не повод терять отметку о поломке.
   }
 };
+
+/** Настроен ли хоть один канал: по нему интерфейс решает, показывать ли кнопку. */
+export const notificationsConfigured = (): boolean =>
+  Boolean((process.env.TELEGRAM_BOT_TOKEN && process.env.TELEGRAM_CHAT_ID) || process.env.WEBHOOK_URL);
 
 let sender: Sender = httpSender;
 

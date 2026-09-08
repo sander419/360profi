@@ -15,7 +15,15 @@ import {
   getStoredUser,
   getToken
 } from '../api/client.ts';
-import type { Defect, Equipment, HistoryEvent, Kit, Photo, SessionUser } from '../api/client.ts';
+import type {
+  Defect,
+  Equipment,
+  HistoryEvent,
+  Kit,
+  Photo,
+  SessionUser,
+  TripSummary
+} from '../api/client.ts';
 import {
   changeDefectStatus,
   checkoutByCode,
@@ -29,8 +37,10 @@ import {
   loadKit,
   loadKits,
   loadPhotos,
+  loadTripSummary,
   newDefectId,
   receiveRest,
+  sendTripSummary,
   similarEquipment,
   optimistic,
   outbox,
@@ -1162,6 +1172,9 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
   const [busy, setBusy] = useState(false);
   const [returning, setReturning] = useState<string | null>(null);
   const [scanCode, setScanCode] = useState('');
+  const [summary, setSummary] = useState<{ summary: TripSummary; canSend: boolean } | null>(null);
+  const [summaryOpen, setSummaryOpen] = useState(false);
+  const [summaryNote, setSummaryNote] = useState('');
 
   const load = useCallback(async () => {
     try {
@@ -1191,6 +1204,31 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
       setBusy(false);
     }
   };
+
+  const openSummary = useCallback(async () => {
+    setSummaryOpen(true);
+    setSummaryNote('');
+    try {
+      setSummary(await loadTripSummary(id));
+    } catch (err) {
+      setSummaryNote(err instanceof ApiError ? err.message : 'Сводка не собралась');
+    }
+  }, [id]);
+
+  // Выезд закрыт — сводка нужна сразу: именно в этот момент её и отправляют в чат.
+  const closed = Boolean(kit && kit.progress.loaded > 0 && kit.progress.loaded === kit.progress.returned);
+  useEffect(() => {
+    if (closed && !summaryOpen) void openSummary();
+  }, [closed, summaryOpen, openSummary]);
+
+  // Отметили ещё одну позицию — открытая сводка обязана пересобраться,
+  // иначе в чат уедет вчерашняя правда.
+  const returnedCount = kit?.progress.returned ?? 0;
+  const loadedCount = kit?.progress.loaded ?? 0;
+  useEffect(() => {
+    if (summaryOpen) void openSummary();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [returnedCount, loadedCount]);
 
   if (error && !kit) return <Notice text={error} tone="error" />;
   if (!kit) return <p className="text-sm text-[var(--muted)]">Загружаем…</p>;
@@ -1268,6 +1306,71 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
       <p className="-mt-2 px-1 text-xs text-[var(--muted2)]">
         Сканируйте всё, что кладёте в машину. Позиции, которой нет в списке, добавятся сами.
       </p>
+
+      {summaryOpen && (
+        <section className="flex flex-col gap-3 rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4">
+          <div className="flex items-baseline justify-between gap-2">
+            <h2 className="font-semibold">Сводка выезда</h2>
+            <button
+              type="button"
+              onClick={() => setSummaryOpen(false)}
+              className="text-xs text-[var(--muted2)]"
+            >
+              свернуть
+            </button>
+          </div>
+
+          {summaryNote && <Notice text={summaryNote} tone="warn" />}
+          {!summary && !summaryNote && (
+            <p className="text-sm text-[var(--muted)]">Собираем…</p>
+          )}
+
+          {summary && (
+            <>
+              <pre className="whitespace-pre-wrap break-words rounded-2xl bg-[var(--bg)] p-3 font-sans text-sm leading-relaxed text-[var(--text)]">
+                {summary.summary.text}
+              </pre>
+              <div className="flex flex-col gap-2">
+                <Button
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(summary.summary.text);
+                      setSummaryNote('Скопировано — вставьте в чат');
+                    } catch {
+                      setSummaryNote('Скопировать не вышло: выделите текст выше вручную');
+                    }
+                  }}
+                >
+                  Скопировать
+                </Button>
+                {summary.canSend && (
+                  <Button
+                    tone="accent"
+                    disabled={busy}
+                    onClick={async () => {
+                      setBusy(true);
+                      try {
+                        await sendTripSummary(kit.id);
+                        setSummaryNote('Сводка ушла в чат');
+                      } catch (err) {
+                        setSummaryNote(err instanceof ApiError ? err.message : 'Не отправилось');
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    Отправить в чат
+                  </Button>
+                )}
+              </div>
+            </>
+          )}
+        </section>
+      )}
+
+      {!summaryOpen && kit.progress.loaded > 0 && (
+        <Button onClick={() => void openSummary()}>Сводка выезда</Button>
+      )}
 
       {pendingReturn > 0 && kit.progress.loaded > 0 && (
         <div className="flex flex-col gap-1">

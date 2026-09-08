@@ -5,7 +5,7 @@
 // временем, когда её сделали, — иначе журнал перестаёт быть доказательством.
 
 import { API_URL, ApiError, apiConfigured, clearSession, getToken, serverNow } from './client.ts';
-import type { Defect, Equipment, HistoryEvent, Kit, Photo } from './client.ts';
+import type { Defect, Equipment, HistoryEvent, Kit, Photo, TripSummary } from './client.ts';
 import { Outbox } from './outbox.ts';
 import type { OutboxEntry, OutboxStorage, SendResult } from './outbox.ts';
 
@@ -249,6 +249,20 @@ export const loadPhotos = async (equipmentId: string): Promise<Photo[]> => {
   }
 };
 
+/** Сводка считается на сервере: она должна быть одинаковой в приложении и в чате. */
+export const loadTripSummary = async (
+  kitId: string
+): Promise<{ summary: TripSummary; canSend: boolean }> => {
+  try {
+    return await get<{ summary: TripSummary; canSend: boolean }>(`/api/v1/kits/${kitId}/summary`);
+  } catch (err) {
+    if (isOffline(err)) {
+      throw new ApiError('Сводка соберётся, когда появится связь', 0);
+    }
+    throw err;
+  }
+};
+
 // --- создание сущностей ------------------------------------------------------
 //
 // Заведение оборудования, проекта и выезда идёт напрямую, без очереди: сервер
@@ -297,6 +311,10 @@ export const createTrip = async (title: string): Promise<Kit> => {
   });
   cacheKit(kit);
   return kit;
+};
+
+export const sendTripSummary = async (kitId: string): Promise<void> => {
+  await post<{ sent: boolean }>(`/api/v1/kits/${kitId}/summary/send`, {});
 };
 
 /** Приём всего, что ещё не принято, целыми. Исключения отмечают до нажатия. */

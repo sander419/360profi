@@ -3,6 +3,8 @@
 
 import type { FastifyInstance } from 'fastify';
 import { nowIso, uid } from '../db.ts';
+import { buildTripSummary } from '../summary.ts';
+import { notify, notificationsConfigured } from '../notify.ts';
 import {
   DomainError,
   changeStatus,
@@ -316,6 +318,19 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
   // Возврат со съёмки.
   // Приём всего остатка целыми. Ночью на разгрузке отмечать двадцать позиций
   // по одной никто не станет: сначала отмечают исключения, потом жмут одну кнопку.
+  // Итог выезда одним текстом: его читают в чате, а не в интерфейсе.
+  app.get('/:id/summary', { preHandler: anyUser }, async (req) => {
+    const { id } = req.params as { id: string };
+    return { summary: buildTripSummary(db, id), canSend: notificationsConfigured() };
+  });
+
+  app.post('/:id/summary/send', { preHandler: anyUser }, async (req) => {
+    const { id } = req.params as { id: string };
+    const summary = buildTripSummary(db, id);
+    notify({ kind: 'summary', text: summary.text });
+    return { sent: true };
+  });
+
   app.post(
     '/:id/checkin-rest',
     {
