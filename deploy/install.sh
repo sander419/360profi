@@ -48,8 +48,10 @@ if ! command -v node >/dev/null 2>&1 || [[ "$(node -v | cut -c2- | cut -d. -f1)"
 fi
 echo "    node $(node -v)"
 
-if ss -tln 2>/dev/null | grep -q ":$PORT "; then
-  echo "Порт $PORT уже занят. Запустите с другим: sudo DOMAIN=$DOMAIN PORT=4100 bash deploy/install.sh" >&2
+# На обновлении порт держит наш же сервис — это норма. Ругаемся только если
+# на нём сидит кто-то посторонний.
+if ss -tln 2>/dev/null | grep -q ":$PORT " && ! systemctl is-active --quiet 360profi-api; then
+  echo "Порт $PORT занят другим процессом. Запустите с другим: sudo DOMAIN=$DOMAIN PORT=4100 bash deploy/install.sh" >&2
   exit 1
 fi
 
@@ -103,19 +105,27 @@ systemctl enable --now 360profi-backup.timer
 systemctl restart 360profi-api.service
 
 echo "==> nginx"
-sed -e "s/sklad.example.ru/$DOMAIN/g" -e "s|127.0.0.1:4000|127.0.0.1:$PORT|g"   "$APP_DIR/deploy/nginx.conf" > /etc/nginx/sites-available/360profi
-# Если на хосте принят общий сниппет защиты от сканеров — подключаем его,
-# чтобы сайт жил по тем же правилам, что и соседние.
-SNIPPET=/etc/nginx/snippets/block-scan.conf
-if [[ -f "$SNIPPET" ]]; then
-  awk -v snip="$SNIPPET" '
-    !done && /^    root / { print "    include " snip ";"; done = 1 }
-    { print }
-  ' /etc/nginx/sites-available/360profi > /tmp/360profi.site && \
-    mv /tmp/360profi.site /etc/nginx/sites-available/360profi
+# Конфиг сайта создаётся один раз. Перезаписывать его на обновлении нельзя:
+# certbot дописывает туда TLS, и очередное обновление версии выключило бы
+# https на работающем сайте.
+if [[ -f /etc/nginx/sites-available/360profi ]]; then
+  echo "    конфиг уже есть, не трогаем — в нём TLS от certbot"
+else
+  sed -e "s/sklad.example.ru/$DOMAIN/g" -e "s|127.0.0.1:4000|127.0.0.1:$PORT|g"     "$APP_DIR/deploy/nginx.conf" > /etc/nginx/sites-available/360profi
+
+  # Если на хосте принят общий сниппет защиты от сканеров — подключаем его,
+  # чтобы сайт жил по тем же правилам, что и соседние.
+  SNIPPET=/etc/nginx/snippets/block-scan.conf
+  if [[ -f "$SNIPPET" ]]; then
+    awk -v snip="$SNIPPET" '
+      !done && /^    root / { print "    include " snip ";"; done = 1 }
+      { print }
+    ' /etc/nginx/sites-available/360profi > /tmp/360profi.site &&       mv /tmp/360profi.site /etc/nginx/sites-available/360profi
+  fi
+
+  ln -sf /etc/nginx/sites-available/360profi /etc/nginx/sites-enabled/360profi
 fi
 
-ln -sf /etc/nginx/sites-available/360profi /etc/nginx/sites-enabled/360profi
 # Чужие сайты на этой машине не трогаем: ни default, ни соседние конфиги.
 # Reload вместо restart и только после nginx -t — если конфиг битый, ничего не упадёт.
 nginx -t
@@ -131,8 +141,13 @@ cat <<EOF
 
 Дальше вручную:
   1. TLS:            certbot --nginx -d $DOMAIN
-  2. Первые люди:    cd $APP_DIR/server && sudo -u profi360 node src/import-users.ts people.csv
-  3. Наклейки:       PUBLIC_APP_URL=https://$DOMAIN/ sudo -u profi360 node src/labels.ts
+  2. Первые люди:    cd $APP_DIR/server && sudo -u profi360 env DB_PATH=$DATA_DIR/360profi.db \
+                       node src/import-users.ts people.csv
+  3. Наклейки:       cd $APP_DIR/server && sudo -u profi360 env DB_PATH=$DATA_DIR/360profi.db \
+                       PUBLIC_APP_URL=https://$DOMAIN/ node src/labels.ts --blank=24
+
+  DB_PATH обязателен: без него команда создаст отдельную пустую базу
+  рядом с кодом, а сервис работает с $DATA_DIR/360profi.db.
   4. Открыть:        https://$DOMAIN/#/field
 
 Порт API:  127.0.0.1:$PORT (наружу только через nginx)

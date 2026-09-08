@@ -248,7 +248,9 @@ const Shell: React.FC<{
           )}
         </div>
       </header>
-      <main className="mx-auto flex w-full max-w-lg flex-col gap-4 px-4 py-5 pb-16">{children}</main>
+      <main className="mx-auto flex w-full max-w-lg flex-col gap-4 px-4 py-5 pb-16 lg:max-w-5xl">
+        {children}
+      </main>
     </div>
   );
 };
@@ -527,7 +529,7 @@ const DefectsScreen: React.FC<{ user: SessionUser }> = ({ user }) => {
       {defects === null && !error && <p className="text-sm text-[var(--muted)]">Загружаем…</p>}
       {defects?.length === 0 && <Notice text="Открытых дефектов нет" tone="ok" />}
 
-      <div className="flex flex-col gap-2">
+      <div className="grid gap-2 lg:grid-cols-2">
         {defects?.map((defect) => (
           <article
             key={defect.id}
@@ -719,7 +721,7 @@ const StockScreen: React.FC = () => {
       />
       {error && <Notice text={error} tone="error" />}
       {items === null && !error && <p className="text-sm text-[var(--muted)]">Загружаем…</p>}
-      <div className="flex flex-col gap-2">
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
         {visible.map((item) => (
           <button
             key={item.id}
@@ -916,7 +918,8 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
   const since = daysSince(item.lastCheckOn);
 
   return (
-    <>
+    <div className="flex flex-col gap-4 lg:grid lg:grid-cols-[1.1fr_1fr] lg:items-start lg:gap-6">
+      <div className="flex flex-col gap-4">
       {stale && <StaleBanner savedAt={stale.savedAt} />}
 
       <section className="rounded-3xl border border-[var(--border)] bg-[var(--surface)] p-4">
@@ -1109,6 +1112,9 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
         )}
       </div>
 
+      </div>
+
+      <div className="flex flex-col gap-4">
       {photos.length > 0 && (
         <section className="flex flex-col gap-2">
           <h2 className="px-1 text-sm font-semibold uppercase tracking-wide text-[var(--muted2)]">
@@ -1160,7 +1166,8 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
           ))}
         </ol>
       </section>
-    </>
+      </div>
+    </div>
   );
 };
 
@@ -1389,7 +1396,7 @@ const KitScreen: React.FC<{ id: string }> = ({ id }) => {
         </div>
       )}
 
-      <div className="flex flex-col gap-2">
+      <div className="grid gap-2 lg:grid-cols-2">
         {kit.items.map((item) => (
           <article
             key={item.equipmentId}
