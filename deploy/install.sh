@@ -60,6 +60,12 @@ id -u profi360 >/dev/null 2>&1 || useradd --system --home "$APP_DIR" --shell /us
 mkdir -p "$APP_DIR" "$DATA_DIR" "$WWW_DIR" /var/backups/360profi
 
 echo "==> Код"
+# Каталог принадлежит profi360, а git запускается от root и по умолчанию
+# отказывается работать с чужим репозиторием. Без этой строки любое обновление
+# падает на первом же fetch.
+git config --global --get-all safe.directory 2>/dev/null | grep -qx "$APP_DIR" ||
+  git config --global --add safe.directory "$APP_DIR"
+
 if [[ -d "$APP_DIR/.git" ]]; then
   git -C "$APP_DIR" fetch --quiet origin
   git -C "$APP_DIR" reset --hard --quiet origin/main
