@@ -735,6 +735,200 @@ describe('снимки поломок', () => {
 
 // Требования закона о персональных данных, проверяемые кодом, а не обещанием.
 // Смысл объявлений не в отправке, а в том, что видно, до кого дошло.
+// Дыры, найденные аудитом логики. Каждая приводила к сорванному выезду
+// или к доступу, который должен был закрыться.
+describe('целостность рабочего процесса', () => {
+  let unit = '';
+  let project = '';
+  let kit = '';
+
+  before(async () => {
+    unit = (
+      await call('POST', '/api/v1/equipment', {
+        token: tokens.tech,
+        body: { code: 'AUD-1', name: 'Экран для аудита', category: 'LED' }
+      })
+    ).json().item.id;
+
+    project = (
+      await call('POST', '/api/v1/projects', { token: tokens.manager, body: { title: 'Аудит' } })
+    ).json().project.id;
+
+    kit = (
+      await call('POST', '/api/v1/kits', {
+        token: tokens.manager,
+        body: { projectId: project, name: 'Комплект аудита' }
+      })
+    ).json().kit.id;
+  });
+
+  test('блокирующая поломка уводит единицу в ремонт сама', async () => {
+    await call('POST', `/api/v1/equipment/${unit}/defects`, {
+      token: tokens.tech,
+      body: { severity: 'blocker', description: 'Не включается' }
+    });
+    const item = await call('GET', `/api/v1/equipment/${unit}`, { token: tokens.tech });
+    assert.equal(
+      item.json().item.status,
+      'repair',
+      'иначе нерабочая единица числится на складе и уезжает на выезд'
+    );
+  });
+
+  test('с блокирующей поломкой не погрузить и не запланировать', async () => {
+    const load = await call('POST', `/api/v1/kits/${kit}/checkout`, {
+      token: tokens.tech,
+      body: { equipmentId: unit }
+    });
+    assert.equal(load.statusCode, 400);
+
+    const plan = await call('POST', `/api/v1/kits/${kit}/items`, {
+      token: tokens.manager,
+      body: { equipmentId: unit }
+    });
+    assert.equal(plan.statusCode, 400);
+  });
+
+  test('закрытие последнего дефекта возвращает единицу в строй', async () => {
+    const defects = (await call('GET', '/api/v1/defects', { token: tokens.manager })).json()
+      .defects as { id: string; equipmentId: string }[];
+    for (const d of defects.filter((x) => x.equipmentId === unit)) {
+      await call('PATCH', `/api/v1/defects/${d.id}`, {
+        token: tokens.manager,
+        body: { status: 'closed' }
+      });
+    }
+
+    const item = await call('GET', `/api/v1/equipment/${unit}`, { token: tokens.tech });
+    assert.equal(item.json().item.status, 'stock', 'починили — значит, снова на складе');
+  });
+
+  test('позиция в списке выезда бронируется, чужой выезд её не заберёт', async () => {
+    const added = await call('POST', `/api/v1/kits/${kit}/items`, {
+      token: tokens.manager,
+      body: { equipmentId: unit }
+    });
+    assert.equal(added.statusCode, 200);
+
+    const item = await call('GET', `/api/v1/equipment/${unit}`, { token: tokens.tech });
+    assert.equal(item.json().item.status, 'reserved');
+    assert.equal(item.json().item.projectId, project);
+
+    const otherKit = (
+      await call('POST', '/api/v1/kits', {
+        token: tokens.manager,
+        body: { projectId: ids.project, name: 'Чужой выезд' }
+      })
+    ).json().kit.id;
+
+    const stolen = await call('POST', `/api/v1/kits/${otherKit}/checkout`, {
+      token: tokens.tech,
+      body: { equipmentId: unit }
+    });
+    assert.equal(stolen.statusCode, 409);
+    assert.match(stolen.json().error, /забронировано/);
+  });
+
+  test('снятие из списка снимает бронь', async () => {
+    await call('DELETE', `/api/v1/kits/${kit}/items/${unit}`, { token: tokens.manager });
+    const item = await call('GET', `/api/v1/equipment/${unit}`, { token: tokens.tech });
+    assert.equal(item.json().item.status, 'stock');
+    assert.equal(item.json().item.projectId, null);
+  });
+
+  test('многодневный выезд: принятую позицию можно погрузить снова', async () => {
+    await call('POST', `/api/v1/kits/${kit}/checkout`, {
+      token: tokens.tech,
+      body: { equipmentId: unit }
+    });
+    await call('POST', `/api/v1/kits/${kit}/checkin`, {
+      token: tokens.tech,
+      body: { equipmentId: unit, returnState: 'ok' }
+    });
+
+    const again = await call('POST', `/api/v1/kits/${kit}/checkout`, {
+      token: tokens.tech,
+      body: { equipmentId: unit }
+    });
+    assert.equal(again.statusCode, 200, 'вечером увезли, утром привезли — обычное дело');
+    const items = again.json().kit.items as { equipmentId: string; checkedInAt: string | null }[];
+    assert.equal(items.find((i) => i.equipmentId === unit)?.checkedInAt, null);
+  });
+
+  test('не вернулось — отдельный статус, а не «вечно на проекте»', async () => {
+    await call('POST', `/api/v1/kits/${kit}/checkin`, {
+      token: tokens.tech,
+      body: { equipmentId: unit, returnState: 'missing', note: 'нет в машине' }
+    });
+
+    const item = await call('GET', `/api/v1/equipment/${unit}`, { token: tokens.tech });
+    assert.equal(item.json().item.status, 'lost');
+    assert.equal(item.json().item.projectId, null, 'проект закроют, а железки нет');
+
+    const load = await call('POST', `/api/v1/kits/${kit}/checkout`, {
+      token: tokens.tech,
+      body: { equipmentId: unit }
+    });
+    assert.equal(load.statusCode, 400, 'потерянное на выезд не отдаём');
+  });
+});
+
+describe('отзыв доступа', () => {
+  // Временные учётки убираем за собой: иначе они попадают в аудиторию
+  // объявлений и ломают проверки охвата в соседнем наборе.
+  after(() => {
+    db.prepare("UPDATE users SET active = 0 WHERE phone IN ('+70000000777', '+70000000778')").run();
+  });
+
+  test('отключённый сотрудник теряет доступ сразу, а не через месяц', async () => {
+    const created = await call('POST', '/api/v1/users', {
+      token: tokens.manager,
+      body: { name: 'Временный', phone: '+70000000777', role: 'tech' }
+    });
+    // Заводить людей может только админ — в этом наборе его нет, поэтому
+    // добавляем напрямую и логинимся честно через API.
+    assert.equal(created.statusCode, 403);
+
+    const id = uid();
+    db.prepare(
+      'INSERT INTO users (id, name, phone, role, pin_hash, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)'
+    ).run(id, 'Временный', '+70000000777', 'tech', hashPin('111111'), nowIso());
+
+    const login = await call('POST', '/api/v1/auth/login', {
+      body: { phone: '+70000000777', pin: '111111' }
+    });
+    const token = login.json().token;
+    assert.equal((await call('GET', '/api/v1/equipment', { token })).statusCode, 200);
+
+    db.prepare('UPDATE users SET active = 0 WHERE id = ?').run(id);
+
+    assert.equal(
+      (await call('GET', '/api/v1/equipment', { token })).statusCode,
+      401,
+      'старый токен в кармане уволенного больше не работает'
+    );
+  });
+
+  test('роль берётся из базы, а не из токена', async () => {
+    const id = uid();
+    db.prepare(
+      'INSERT INTO users (id, name, phone, role, pin_hash, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)'
+    ).run(id, 'Бывший менеджер', '+70000000778', 'manager', hashPin('222222'), nowIso());
+
+    const token = (
+      await call('POST', '/api/v1/auth/login', { body: { phone: '+70000000778', pin: '222222' } })
+    ).json().token;
+    assert.equal((await call('GET', '/api/v1/status', { token })).statusCode, 200);
+
+    db.prepare("UPDATE users SET role = 'tech' WHERE id = ?").run(id);
+    assert.equal(
+      (await call('GET', '/api/v1/status', { token })).statusCode,
+      403,
+      'понижение в правах действует сразу, а не после перевхода'
+    );
+  });
+});
+
 describe('объявления руководства', () => {
   let id = '';
 
@@ -902,11 +1096,24 @@ describe('аналитика', () => {
 
   test('на пустой базе не выдумывает выводов', async () => {
     const empty = openDb(':memory:');
+    // Своя учётка: токен теперь сверяется с базой на каждом запросе,
+    // поэтому чужой токен в чужую базу не пройдёт — и это правильно.
+    empty
+      .prepare(
+        'INSERT INTO users (id, name, phone, role, pin_hash, active, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)'
+      )
+      .run(uid(), 'Пустой Менеджер', '+70000009999', 'manager', hashPin('999999'), nowIso());
+
     const emptyApp = await buildApp({ db: empty });
+    const login = await emptyApp.inject({
+      method: 'POST',
+      url: '/api/v1/auth/login',
+      payload: { phone: '+70000009999', pin: '999999' }
+    });
     const res = await emptyApp.inject({
       method: 'GET',
       url: '/api/v1/analytics',
-      headers: { authorization: `Bearer ${tokens.manager}` }
+      headers: { authorization: `Bearer ${login.json().token}` }
     });
     const { analytics } = res.json();
 

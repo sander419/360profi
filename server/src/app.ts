@@ -58,11 +58,26 @@ export const buildApp = async (options: BuildOptions = {}): Promise<FastifyInsta
 
   // Токен разбирается для всех запросов, а доступ проверяет guard на маршруте:
   // так публичные и защищённые ручки живут рядом без дублирования кода.
+  const activeUser = db.prepare('SELECT name, role FROM users WHERE id = ? AND active = 1');
+
   app.addHook('onRequest', async (req) => {
     const header = req.headers.authorization;
-    if (header?.startsWith('Bearer ')) {
-      req.user = verifyToken(header.slice(7), secret);
-    }
+    if (!header?.startsWith('Bearer ')) return;
+
+    const session = verifyToken(header.slice(7), secret);
+    if (!session) return;
+
+    // Токен живёт месяц, и одной подписи мало: уволенный сотрудник с телефоном
+    // в кармане сохранял бы доступ до тридцати дней. Сверяем с базой на каждом
+    // запросе — это один поиск по первичному ключу.
+    const fresh = activeUser.get(session.id) as unknown as
+      | { name: string; role: 'admin' | 'manager' | 'tech' }
+      | undefined;
+    if (!fresh) return;
+
+    // Роль берём из базы, а не из токена: понижение в правах должно
+    // действовать сразу, а не после следующего входа.
+    req.user = { id: session.id, name: fresh.name, role: fresh.role };
   });
 
   app.decorate('guard', (roles: Role[]) => async (req: FastifyRequest, reply: FastifyReply) => {

@@ -2,7 +2,7 @@
 
 import type { FastifyInstance } from 'fastify';
 import { nowIso, uid } from '../db.ts';
-import { DomainError } from '../domain.ts';
+import { DomainError, changeStatus, getEquipment, openDefectCount } from '../domain.ts';
 import { hashPin, randomPin } from '../auth.ts';
 import type { Role } from '../auth.ts';
 
@@ -123,6 +123,34 @@ export const catalogRoutes = async (app: FastifyInstance): Promise<void> => {
     }
   );
 
+  app.patch(
+    '/users/:id',
+    {
+      preHandler: admins,
+      schema: {
+        body: {
+          type: 'object',
+          required: ['active'],
+          properties: { active: { type: 'boolean' } }
+        }
+      }
+    },
+    async (req) => {
+      const { id } = req.params as { id: string };
+      const { active } = req.body as { active: boolean };
+      if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(id)) {
+        throw new DomainError('Сотрудник не найден', 404);
+      }
+      if (id === req.user!.id && !active) {
+        throw new DomainError('Нельзя отключить самого себя: некому будет включить обратно');
+      }
+      db.prepare('UPDATE users SET active = ? WHERE id = ?').run(active ? 1 : 0, id);
+      // Токен у отключённого перестаёт работать сразу: проверка активности
+      // идёт при каждом запросе, а не только при входе.
+      return { ok: true, active };
+    }
+  );
+
   app.post('/users/:id/pin', { preHandler: admins }, async (req) => {
     const { id } = req.params as { id: string };
     if (!db.prepare('SELECT 1 FROM users WHERE id = ?').get(id)) {
@@ -204,7 +232,26 @@ export const catalogRoutes = async (app: FastifyInstance): Promise<void> => {
         status === 'closed' ? req.user!.id : null,
         id
       );
-      return { ok: true };
+
+      // Починили последнее — значит, железка снова в строю. Без этого она
+      // оставалась в ремонте до тех пор, пока кто-нибудь случайно не заметит,
+      // и рабочее оборудование месяцами числилось сломанным.
+      let returnedToStock = false;
+      if (status === 'closed' && openDefectCount(db, defect.equipment_id) === 0) {
+        const item = getEquipment(db, defect.equipment_id);
+        if (item.status === 'repair') {
+          changeStatus(db, {
+            equipmentId: defect.equipment_id,
+            status: 'stock',
+            projectId: null,
+            userId: req.user!.id,
+            note: 'Автоматически: закрыт последний дефект'
+          });
+          returnedToStock = true;
+        }
+      }
+
+      return { ok: true, returnedToStock };
     }
   );
 };

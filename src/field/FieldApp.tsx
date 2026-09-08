@@ -67,8 +67,9 @@ const STATUS_LABEL: Record<string, string> = {
   stock: 'На складе',
   project: 'На проекте',
   repair: 'В ремонте',
-  reserved: 'В резерве',
-  transit: 'В пути'
+  reserved: 'Забронировано',
+  transit: 'В пути',
+  lost: 'Не вернулось'
 };
 
 const STATUS_TONE: Record<string, string> = {
@@ -76,7 +77,8 @@ const STATUS_TONE: Record<string, string> = {
   project: 'var(--acc)',
   repair: 'var(--bad)',
   reserved: 'var(--vio)',
-  transit: 'var(--warn)'
+  transit: 'var(--warn)',
+  lost: 'var(--bad)'
 };
 
 const EVENT_LABEL: Record<string, string> = {
@@ -1682,7 +1684,26 @@ const EquipmentScreen: React.FC<{ code: string }> = ({ code }) => {
           </section>
         )}
 
-        {item.status !== 'repair' ? (
+        {item.status === 'lost' ? (
+          <Button
+            tone="ok"
+            disabled={busy}
+            onClick={() =>
+              act(
+                () =>
+                  perform({
+                    path: `/api/v1/equipment/${item.id}/status`,
+                    body: { status: 'stock', projectId: null, note: 'Нашлась' },
+                    label: `${item.code} · нашлась`,
+                    apply: optimistic.status(item.id, 'stock')
+                  }),
+                'Единица снова на складе'
+              )
+            }
+          >
+            Нашлась — вернуть на склад
+          </Button>
+        ) : item.status !== 'repair' ? (
           <Button
             disabled={busy}
             onClick={() =>

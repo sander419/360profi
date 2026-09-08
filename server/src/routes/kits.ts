@@ -9,6 +9,7 @@ import {
   DomainError,
   changeStatus,
   getEquipment,
+  hasBlockingDefect,
   openDefect,
   logEvent,
   sanitizeOccurredAt
@@ -167,12 +168,37 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
       const { id } = req.params as { id: string };
       const { equipmentId } = req.body as { equipmentId: string };
       const kit = getKit(db, id);
-      getEquipment(db, equipmentId);
+      const equipment = getEquipment(db, equipmentId);
+
+      if (equipment.status === 'repair' || equipment.status === 'lost') {
+        throw new DomainError('Эту единицу нельзя планировать на выезд: она не в строю');
+      }
+      if (
+        (equipment.status === 'project' || equipment.status === 'reserved') &&
+        equipment.project_id &&
+        equipment.project_id !== kit.project_id
+      ) {
+        throw new DomainError('Оборудование уже занято другим выездом', 409);
+      }
+
       db.prepare('INSERT OR IGNORE INTO kit_items (kit_id, equipment_id, added_at) VALUES (?, ?, ?)').run(
         id,
         equipmentId,
         nowIso()
       );
+
+      // Позиция в списке — это бронь. Без неё две бригады спокойно планируют
+      // один и тот же экран, и выясняется это утром на погрузке.
+      if (equipment.status === 'stock') {
+        changeStatus(db, {
+          equipmentId,
+          status: 'reserved',
+          projectId: kit.project_id,
+          userId: req.user!.id,
+          note: `Забронировано под выезд «${kit.name}»`
+        });
+      }
+
       return { kit: kitPayload(db, kit) };
     }
   );
@@ -186,6 +212,20 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
     if (!item) throw new DomainError('Позиции нет в комплекте', 404);
     if (item.checked_out_at) throw new DomainError('Позиция уже отгружена, её нельзя убрать');
     db.prepare('DELETE FROM kit_items WHERE kit_id = ? AND equipment_id = ?').run(id, equipmentId);
+
+    // Убрали из списка — снимаем бронь, иначе единица останется «занятой»
+    // под выезд, в котором её больше нет.
+    const equipment = getEquipment(db, equipmentId);
+    if (equipment.status === 'reserved' && equipment.project_id === kit.project_id) {
+      changeStatus(db, {
+        equipmentId,
+        status: 'stock',
+        projectId: null,
+        userId: req.user!.id,
+        note: `Убрано из выезда «${kit.name}», бронь снята`
+      });
+    }
+
     return { kit: kitPayload(db, kit) };
   });
 
@@ -213,9 +253,17 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
       const kit = getKit(db, id);
 
       const item = db
-        .prepare('SELECT checked_out_at FROM kit_items WHERE kit_id = ? AND equipment_id = ?')
-        .get(id, body.equipmentId) as { checked_out_at: string | null } | undefined;
-      if (item?.checked_out_at) {
+        .prepare(
+          'SELECT checked_out_at, checked_in_at FROM kit_items WHERE kit_id = ? AND equipment_id = ?'
+        )
+        .get(id, body.equipmentId) as
+        | { checked_out_at: string | null; checked_in_at: string | null }
+        | undefined;
+
+      // Уже отмечена и ещё не принята — значит, её пытаются погрузить дважды.
+      // А вот принятую позицию можно грузить снова: многодневные мероприятия,
+      // где вечером увозят, а утром привозят обратно, — обычное дело.
+      if (item?.checked_out_at && !item.checked_in_at) {
         throw new DomainError('Позиция уже отмечена как отгруженная', 409);
       }
 
@@ -225,8 +273,25 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
       if (equipment.status === 'repair') {
         throw new DomainError('Оборудование в ремонте — на выезд его брать нельзя');
       }
-      if (equipment.status === 'project' && equipment.project_id !== kit.project_id) {
-        throw new DomainError('Оборудование уже на другом проекте', 409);
+      if (equipment.status === 'lost') {
+        throw new DomainError('Эта единица числится потерянной — сначала найдите её');
+      }
+      // Статус может быть «на складе», а поломка при этом блокирующая: без этой
+      // проверки нерабочая техника спокойно уезжает на площадку.
+      if (hasBlockingDefect(db, body.equipmentId)) {
+        throw new DomainError('У этой единицы открыта блокирующая поломка — она не работает');
+      }
+      if (
+        (equipment.status === 'project' || equipment.status === 'reserved') &&
+        equipment.project_id &&
+        equipment.project_id !== kit.project_id
+      ) {
+        throw new DomainError(
+          equipment.status === 'reserved'
+            ? 'Оборудование забронировано под другой выезд'
+            : 'Оборудование уже на другом проекте',
+          409
+        );
       }
 
       // Позиции нет в списке — значит, список составлял не тот, кто грузит.
@@ -239,8 +304,12 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
         );
       }
 
+      // Повторная погрузка сбрасывает отметку приёма: позиция снова в машине.
       db.prepare(
-        'UPDATE kit_items SET checked_out_at = ?, checked_out_by = ?, note = ? WHERE kit_id = ? AND equipment_id = ?'
+        `UPDATE kit_items
+            SET checked_out_at = ?, checked_out_by = ?, note = ?,
+                checked_in_at = NULL, checked_in_by = NULL, return_state = NULL
+          WHERE kit_id = ? AND equipment_id = ?`
       ).run(occurredAt ?? nowIso(), req.user!.id, body.note ?? '', id, body.equipmentId);
 
       changeStatus(db, {
@@ -276,12 +345,14 @@ export const kitRoutes = async (app: FastifyInstance): Promise<void> => {
     ).run(occurredAt ?? nowIso(), userId, returnState, note, kit.id, equipmentId);
 
     if (returnState === 'missing') {
-      logEvent(db, {
+      // Раньше единица оставалась «на проекте» навсегда: проект закрыт, а железка
+      // по документам всё ещё там. Теперь у пропажи свой статус.
+      changeStatus(db, {
         equipmentId,
-        kind: 'kit_in',
-        projectId: kit.project_id,
+        status: 'lost',
         userId,
-        note: `Не вернулось с проекта: ${note}`.trim(),
+        note: `Не вернулось с выезда «${kit.name}». ${note}`.trim(),
+        kind: 'kit_in',
         occurredAt
       });
       openDefect(db, {

@@ -5,14 +5,22 @@ import type { DatabaseSync } from 'node:sqlite';
 import { uid, nowIso, todayIso, isoDateOf } from './db.ts';
 import { notify } from './notify.ts';
 
-export type EquipmentStatus = 'stock' | 'project' | 'repair' | 'reserved' | 'transit';
+export type EquipmentStatus =
+  | 'stock'
+  | 'project'
+  | 'repair'
+  | 'reserved'
+  | 'transit'
+  /** Не вернулось с выезда. Отдельный статус, потому что «на проекте» навсегда — это ложь. */
+  | 'lost';
 
 export const EQUIPMENT_STATUSES: EquipmentStatus[] = [
   'stock',
   'project',
   'repair',
   'reserved',
-  'transit'
+  'transit',
+  'lost'
 ];
 
 export type EventKind =
@@ -117,6 +125,26 @@ export const changeStatus = (
     throw new DomainError(`Неизвестный статус: ${params.status}`);
   }
 
+  // Потерянное не привязано ни к чему: проект закроют, а железки не будет.
+  if (params.status === 'lost') {
+    db.prepare('UPDATE equipment SET status = ?, project_id = NULL, updated_at = ? WHERE id = ?').run(
+      'lost',
+      nowIso(),
+      params.equipmentId
+    );
+    logEvent(db, {
+      equipmentId: params.equipmentId,
+      kind: params.kind ?? 'status',
+      fromStatus: current.status,
+      toStatus: 'lost',
+      projectId: current.project_id,
+      userId: params.userId,
+      note: params.note ?? '',
+      occurredAt: params.occurredAt ?? null
+    });
+    return getEquipment(db, params.equipmentId);
+  }
+
   // На проекте и в резерве единица обязана быть привязана к проекту,
   // иначе «оборудование на выезде» превращается в необнаружимую пропажу.
   const needsProject = params.status === 'project' || params.status === 'reserved';
@@ -209,6 +237,21 @@ export const openDefect = (
     occurredAt: params.occurredAt ?? null
   });
 
+  // Блокирующая поломка означает «не работает». Оставлять такую единицу
+  // в статусе «на складе» — прямой путь к тому, что её погрузят на выезд.
+  // На проекте не трогаем: она физически там, увезти её обратно нельзя.
+  const item = getEquipment(db, params.equipmentId);
+  if (params.severity === 'blocker' && (item.status === 'stock' || item.status === 'reserved')) {
+    changeStatus(db, {
+      equipmentId: params.equipmentId,
+      status: 'repair',
+      projectId: null,
+      userId: params.userId,
+      note: 'Автоматически: заведена блокирующая поломка',
+      occurredAt: params.occurredAt ?? null
+    });
+  }
+
   // О мелочах не пишем никому: оповещение, которое приходит на каждый скол,
   // через неделю перестают читать.
   if (params.severity !== 'low') {
@@ -230,6 +273,25 @@ ${severityWord}: ${params.description}
 
   return { id };
 };
+
+/** Есть ли блокирующая поломка: с такой на выезд нельзя, как и из ремонта. */
+export const hasBlockingDefect = (db: DatabaseSync, equipmentId: string): boolean =>
+  Boolean(
+    db
+      .prepare(
+        "SELECT 1 FROM defects WHERE equipment_id = ? AND severity = 'blocker' AND status != 'closed' LIMIT 1"
+      )
+      .get(equipmentId)
+  );
+
+export const openDefectCount = (db: DatabaseSync, equipmentId: string): number =>
+  Number(
+    (
+      db
+        .prepare("SELECT COUNT(*) AS c FROM defects WHERE equipment_id = ? AND status != 'closed'")
+        .get(equipmentId) as unknown as { c: number }
+    ).c
+  );
 
 // Открытые дефекты по списку единиц — чтобы не делать запрос на каждую строку списка.
 export const openDefectCounts = (db: DatabaseSync, ids: string[]): Map<string, number> => {

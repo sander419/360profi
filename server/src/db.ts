@@ -70,7 +70,18 @@ export const openDb = (dbPath = defaultDbPath()): DatabaseSync => {
   }
   const db = new DatabaseSync(dbPath);
   db.exec('PRAGMA journal_mode = WAL');
+
+  // Внешние ключи на время миграций выключены: перестройка таблицы (единственный
+  // способ изменить CHECK в SQLite) иначе рвёт ссылки из дочерних таблиц.
+  db.exec('PRAGMA foreign_keys = OFF');
+  const applied = migrate(db);
+  if (applied > 0) {
+    const broken = db.prepare('PRAGMA foreign_key_check').all();
+    if (broken.length > 0) {
+      throw new Error(`После миграций осталось ${broken.length} битых ссылок — база не поднята`);
+    }
+  }
   db.exec('PRAGMA foreign_keys = ON');
-  migrate(db);
+
   return db;
 };
